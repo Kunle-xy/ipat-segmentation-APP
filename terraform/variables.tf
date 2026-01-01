@@ -31,7 +31,7 @@ variable "credentials_file" {
 variable "service_account_email" {
   description = "Service account email"
   type        = string
-  default     = "zoomcamp-service@vernal-citadel-479904-i2.iam.gserviceaccount.com"
+  default     = "ipat-segmentation@vernal-citadel-479904-i2.iam.gserviceaccount.com"
 }
 
 variable "create_service_account" {

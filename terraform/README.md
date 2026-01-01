@@ -1,6 +1,6 @@
 # IPAT Terraform Configuration
 
-This directory contains Terraform configuration for provisioning GCP resources for the IPAT Distress Analysis application.
+This directory contains Terraform configuration for provisioning GCP resources for the IPAT segmentation applications.
 
 ## Resources Managed
 
