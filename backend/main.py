@@ -46,9 +46,9 @@ def clean_and_cast_columns(df, filename=""):
     """
     # Columns that should be numeric (float) - only keep essential ones
     numeric_columns = {
-        'FROM_MEASURE', 'TO_MEASURE', 'WIDTH',
+        'FROM_MEASURE', 'TO_MEASURE',
         'BEGIN_GLAT', 'BEGIN_GLON', 'END_GLAT', 'END_GLON',
-        'IRI', 'COUNTY_ID', 'FCLASS'
+        'IRI', 'COUNTY_ID'
     }
 
     # Get columns that exist in this dataframe
@@ -143,7 +143,7 @@ def health_check():
     try:
         query = "SELECT 1"
         client.query(query).result()
-        return {"status": "healthy", "bigquery": "connected", "project": PROJECT_ID}
+        return {"result": "OK","status": "healthy", "bigquery": "connected", "project": PROJECT_ID }
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
@@ -151,7 +151,7 @@ def health_check():
 @app.post("/upload")
 async def upload_files(files: List[UploadFile] = File(...), county_name: str = None):
     """
-    Upload multiple Excel files containing IPAT distress data.
+    Upload multiple Excel files containing IPAT segmentation data.
     Each file should be named with the year (e.g., 2020.xlsx, 2021.xlsx)
     or contain the year in the filename.
 
@@ -227,7 +227,7 @@ async def upload_files(files: List[UploadFile] = File(...), county_name: str = N
             required_columns = [
                 "ROUTE_NAME", "FROM_MEASURE", "TO_MEASURE",
                 "BEGIN_GLAT", "BEGIN_GLON", "END_GLAT", "END_GLON",
-                "IRI", "COUNTY_ID", "SURFTYPE", "FCLASS", "WIDTH"
+                "IRI", "COUNTY_ID", "SURFTYPE"
             ]
 
             missing_columns = [col for col in required_columns if col not in df.columns]
@@ -240,7 +240,7 @@ async def upload_files(files: List[UploadFile] = File(...), county_name: str = N
             # Clean and cast all columns properly
             df = clean_and_cast_columns(df, file.filename)
 
-            # Only drop rows with null ROUTE_NAME (keep rows with null IRI, WIDTH, etc.)
+            # Only drop rows with null ROUTE_NAME (keep rows with null IRI, etc.)
             # AVG() will automatically ignore NULL values when calculating averages
             df = df.dropna(subset=["ROUTE_NAME"])
 
@@ -286,32 +286,55 @@ async def upload_files(files: List[UploadFile] = File(...), county_name: str = N
 
 @app.post("/process")
 def process_data(
-    num_segments: int = 20,
+    num_segments: int = 10,
     county_name: str = None,
-    selected_years: str = None
+    selected_years: str = None,
+    segmentation_type: str = "fixed",
+    segment_distance: float = 0.1
 ):
     """
     Run the IPAT segmentation pipeline on uploaded data for a specific county.
 
     Args:
-        num_segments: Number of segments to create per route (default: 20)
+        num_segments: Number of segments to create per route (default: 20) - used when segmentation_type='fixed'
         county_name: Name of the county (required)
         selected_years: Comma-separated list of years to process (optional, processes all if not provided)
+        segmentation_type: Type of segmentation - 'fixed' (by count) or 'distance' (by uniform mile distance)
+        segment_distance: Distance in miles for each segment (default: 0.1) - used when segmentation_type='distance'
 
     Returns the number of routes and segments processed.
     """
     try:
-        # Validate segments
-        if num_segments < 10:
+        # Validate segmentation type
+        if segmentation_type not in ["fixed", "distance"]:
             raise HTTPException(
                 status_code=400,
-                detail="Minimum number of segments is 10. Please select at least 10 segments."
+                detail="segmentation_type must be either 'fixed' or 'distance'"
             )
-        if num_segments > 100:
-            raise HTTPException(
-                status_code=400,
-                detail="Maximum number of segments is 100."
-            )
+
+        # Validate parameters based on segmentation type
+        if segmentation_type == "fixed":
+            if num_segments < 10:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Minimum number of segments is 10. Please select at least 10 segments."
+                )
+            if num_segments > 100:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Maximum number of segments is 100."
+                )
+        else:  # distance
+            if segment_distance <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Segment distance must be greater than 0 miles"
+                )
+            if segment_distance > 10:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Segment distance cannot exceed 10 miles"
+                )
 
         if not county_name:
             raise HTTPException(
@@ -366,7 +389,10 @@ def process_data(
 
         logger.info(f"🎯 FULL SEGMENTATION PIPELINE STARTING")
         logger.info(f"📊 Processing {len(years)} years for county {county_name}: {years_list}")
-        logger.info(f"🔢 Creating {num_segments} segments per route")
+        if segmentation_type == "fixed":
+            logger.info(f"🔢 Segmentation Type: Fixed Number ({num_segments} segments per route)")
+        else:
+            logger.info(f"🔢 Segmentation Type: Uniform Distance ({segment_distance} miles per segment)")
         logger.info(f"🗺️  Will apply overlapping segment logic for years: {years_list}")
 
         # Build UNION ALL query for all years
@@ -376,7 +402,7 @@ def process_data(
             union_parts.append(f"""
                 SELECT ROUTE_NAME, FROM_MEASURE, TO_MEASURE,
                        BEGIN_GLAT, BEGIN_GLON, END_GLAT, END_GLON,
-                       IRI, COUNTY_ID, SURFTYPE, FCLASS, WIDTH,
+                       IRI, COUNTY_ID, SURFTYPE,
                        {year} AS data_year
                 FROM `{PROJECT_ID}.{county_dataset}.{table}`
                 WHERE ROUTE_NAME IS NOT NULL
@@ -386,7 +412,7 @@ def process_data(
                   AND BEGIN_GLON IS NOT NULL
                   AND END_GLAT IS NOT NULL
                   AND END_GLON IS NOT NULL
-                  -- IRI and WIDTH can be NULL - AVG() will ignore them
+                  -- IRI can be NULL - AVG() will ignore it
             """)
 
         # Create combined table
@@ -437,6 +463,56 @@ def process_data(
         logger.info(f"✅ valid_routes table created successfully")
 
         # Create segmented data with proper overlapping logic
+        # Build segment_definitions CTE based on segmentation type
+        if segmentation_type == "fixed":
+            # Fixed number of segments - divide route evenly
+            segment_definitions_cte = f"""
+        segment_definitions AS (
+            SELECT rb.ROUTE_NAME,
+                   segment_id,
+                   -- Calculate exact start and end measures for each segment
+                   rb.route_min + ((segment_id - 1) * (rb.route_max - rb.route_min) / {num_segments}) AS segment_start,
+                   rb.route_min + (segment_id * (rb.route_max - rb.route_min) / {num_segments}) AS segment_end
+            FROM route_bounds rb
+            CROSS JOIN UNNEST(GENERATE_ARRAY(1, {num_segments})) AS segment_id
+            WHERE rb.ROUTE_NAME IN (SELECT ROUTE_NAME FROM valid_routes_with_overlap)
+        )"""
+            expected_segments_per_route = num_segments
+        else:  # distance-based segmentation
+            # Uniform distance segments - create segments of fixed distance
+            segment_definitions_cte = f"""
+        route_segment_counts AS (
+            -- Calculate how many segments each route will have
+            SELECT ROUTE_NAME,
+                   route_min,
+                   route_max,
+                   (route_max - route_min) AS route_length,
+                   -- Number of full segments that fit
+                   CAST(FLOOR((route_max - route_min) / {segment_distance}) AS INT64) AS num_full_segments,
+                   -- Check if there's a remainder (will create one more segment)
+                   CASE WHEN (route_max - route_min) - FLOOR((route_max - route_min) / {segment_distance}) * {segment_distance} > 0.001
+                        THEN 1 ELSE 0 END AS has_remainder
+            FROM route_bounds
+            WHERE ROUTE_NAME IN (SELECT ROUTE_NAME FROM valid_routes_with_overlap)
+        ),
+        segment_definitions AS (
+            SELECT rsc.ROUTE_NAME,
+                   segment_id,
+                   -- Calculate start position
+                   rsc.route_min + ((segment_id - 1) * {segment_distance}) AS segment_start,
+                   -- Calculate end position
+                   CASE
+                     -- If this is the last segment and we have a remainder, end at route_max
+                     WHEN segment_id > rsc.num_full_segments THEN rsc.route_max
+                     -- Otherwise, end at the next distance interval
+                     ELSE rsc.route_min + (segment_id * {segment_distance})
+                   END AS segment_end
+            FROM route_segment_counts rsc
+            CROSS JOIN UNNEST(GENERATE_ARRAY(1, rsc.num_full_segments + rsc.has_remainder)) AS segment_id
+        )"""
+            # For distance-based, we don't have a fixed expected count (varies by route)
+            expected_segments_per_route = None
+
         segmentation_query = f"""
         CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.distress_segmented` AS
         WITH year_bounds AS (
@@ -478,16 +554,7 @@ def process_data(
             HAVING MIN(has_full_overlap) = 1  -- All years must have full overlap
         ),
         -- Define exact segment boundaries based on route overlapping range
-        segment_definitions AS (
-            SELECT rb.ROUTE_NAME,
-                   segment_id,
-                   -- Calculate exact start and end measures for each segment
-                   rb.route_min + ((segment_id - 1) * (rb.route_max - rb.route_min) / {num_segments}) AS segment_start,
-                   rb.route_min + (segment_id * (rb.route_max - rb.route_min) / {num_segments}) AS segment_end
-            FROM route_bounds rb
-            CROSS JOIN UNNEST(GENERATE_ARRAY(1, {num_segments})) AS segment_id
-            WHERE rb.ROUTE_NAME IN (SELECT ROUTE_NAME FROM valid_routes_with_overlap)
-        ),
+        {segment_definitions_cte},
         all_years_with_index AS (
             -- Add row index (0-based) for each route and year
             SELECT *,
@@ -503,7 +570,7 @@ def process_data(
                    sd.segment_end,
                    d.FROM_MEASURE, d.TO_MEASURE,
                    d.BEGIN_GLAT, d.BEGIN_GLON, d.END_GLAT, d.END_GLON,
-                   d.IRI, d.COUNTY_ID, d.SURFTYPE, d.FCLASS, d.WIDTH,
+                   d.IRI, d.COUNTY_ID, d.SURFTYPE,
                    d.row_index,
                    -- Rank segments by how well they match this row (prefer segment where FROM_MEASURE is closest to segment_start)
                    ROW_NUMBER() OVER (
@@ -522,25 +589,22 @@ def process_data(
             SELECT ROUTE_NAME, data_year, segment_id, segment_start, segment_end,
                    FROM_MEASURE, TO_MEASURE,
                    BEGIN_GLAT, BEGIN_GLON, END_GLAT, END_GLON,
-                   IRI, COUNTY_ID, SURFTYPE, FCLASS, WIDTH, row_index
+                   IRI, COUNTY_ID, SURFTYPE, row_index
             FROM data_with_segments_all_matches
             WHERE segment_rank = 1
         ),
         segment_stats AS (
             -- SIMPLE AVERAGE of all rows within each segment, per year
-            -- AVG() automatically ignores NULL values - only averages non-NULL IRI and WIDTH
+            -- AVG() automatically ignores NULL values - only averages non-NULL IRI
             SELECT ROUTE_NAME, data_year, segment_id,
                    MIN(segment_start) AS segment_from_measure,
                    MAX(segment_end) AS segment_to_measure,
                    COUNT(*) AS record_count,
                    MAX(COUNTY_ID) AS county_id,
                    MAX(SURFTYPE) AS surftype,  -- MAX surftype
-                   MAX(FCLASS) AS fclass,
                    AVG(IRI) AS avg_iri,        -- Simple average - NULL values ignored
-                   AVG(WIDTH) AS avg_width,    -- Simple average - NULL values ignored
                    -- Count non-NULL values for debugging
                    COUNT(IRI) AS iri_count,
-                   COUNT(WIDTH) AS width_count,
                    -- Collect row indices used for this segment (comma-separated)
                    STRING_AGG(CAST(row_index AS STRING), ',' ORDER BY row_index) AS row_indices
             FROM data_with_segments
@@ -569,7 +633,7 @@ def process_data(
                s.record_count,
                sc.from_lat, sc.from_lon,
                sc.to_lat, sc.to_lon,
-               s.county_id, s.surftype, s.fclass, s.avg_width, s.avg_iri,
+               s.county_id, s.surftype, s.avg_iri,
                s.row_indices
         FROM segment_stats s
         JOIN segment_coords sc
@@ -584,7 +648,10 @@ def process_data(
         """
         logger.info(f"🔨 Creating distress_segmented table with overlapping segment logic")
         client.query(segmentation_query).result()
-        logger.info(f"✅ distress_segmented table created with {num_segments} segments per route")
+        if segmentation_type == "fixed":
+            logger.info(f"✅ distress_segmented table created with {num_segments} segments per route")
+        else:
+            logger.info(f"✅ distress_segmented table created with {segment_distance} mile segments")
 
         # Log overlap statistics
         overlap_stats_query = f"""
@@ -619,30 +686,67 @@ def process_data(
 
         # Keep only routes with all segments across ALL years
         # Each segment must exist in every selected year
-        complete_segments_query = f"""
-        CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.distress_segmented_complete` AS
-        WITH segments_in_all_years AS (
-            -- Get route-segment combinations that exist in all years
-            SELECT ROUTE_NAME, segment_id
-            FROM `{PROJECT_ID}.{county_dataset}.distress_segmented`
-            GROUP BY ROUTE_NAME, segment_id
-            HAVING COUNT(DISTINCT data_year) = {len(years)}
-               AND MIN(record_count) > 0
-        ),
-        routes_with_all_segments AS (
-            -- Get routes that have all {num_segments} segments in all years
-            SELECT ROUTE_NAME
-            FROM segments_in_all_years
-            GROUP BY ROUTE_NAME
-            HAVING COUNT(DISTINCT segment_id) = {num_segments}
-        )
-        SELECT s.*
-        FROM `{PROJECT_ID}.{county_dataset}.distress_segmented` s
-        INNER JOIN segments_in_all_years sia
-            ON s.ROUTE_NAME = sia.ROUTE_NAME
-            AND s.segment_id = sia.segment_id
-        WHERE s.ROUTE_NAME IN (SELECT ROUTE_NAME FROM routes_with_all_segments)
-        """
+        if segmentation_type == "fixed":
+            # For fixed segments, all routes should have exactly num_segments segments
+            complete_segments_query = f"""
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.distress_segmented_complete` AS
+            WITH segments_in_all_years AS (
+                -- Get route-segment combinations that exist in all years
+                SELECT ROUTE_NAME, segment_id
+                FROM `{PROJECT_ID}.{county_dataset}.distress_segmented`
+                GROUP BY ROUTE_NAME, segment_id
+                HAVING COUNT(DISTINCT data_year) = {len(years)}
+                   AND MIN(record_count) > 0
+            ),
+            routes_with_all_segments AS (
+                -- Get routes that have all {num_segments} segments in all years
+                SELECT ROUTE_NAME
+                FROM segments_in_all_years
+                GROUP BY ROUTE_NAME
+                HAVING COUNT(DISTINCT segment_id) = {num_segments}
+            )
+            SELECT s.*
+            FROM `{PROJECT_ID}.{county_dataset}.distress_segmented` s
+            INNER JOIN segments_in_all_years sia
+                ON s.ROUTE_NAME = sia.ROUTE_NAME
+                AND s.segment_id = sia.segment_id
+            WHERE s.ROUTE_NAME IN (SELECT ROUTE_NAME FROM routes_with_all_segments)
+            """
+        else:  # distance-based
+            # For distance segments, each route can have different number of segments
+            # Just ensure each segment exists in all years
+            complete_segments_query = f"""
+            CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.distress_segmented_complete` AS
+            WITH segments_in_all_years AS (
+                -- Get route-segment combinations that exist in all years
+                SELECT ROUTE_NAME, segment_id
+                FROM `{PROJECT_ID}.{county_dataset}.distress_segmented`
+                GROUP BY ROUTE_NAME, segment_id
+                HAVING COUNT(DISTINCT data_year) = {len(years)}
+                   AND MIN(record_count) > 0
+            ),
+            route_expected_segments AS (
+                -- For each route, get the expected number of segments (max segment_id)
+                SELECT ROUTE_NAME, MAX(segment_id) AS expected_segments
+                FROM `{PROJECT_ID}.{county_dataset}.distress_segmented`
+                GROUP BY ROUTE_NAME
+            ),
+            routes_with_all_segments AS (
+                -- Get routes where all expected segments exist in all years
+                SELECT sia.ROUTE_NAME
+                FROM segments_in_all_years sia
+                INNER JOIN route_expected_segments res
+                    ON sia.ROUTE_NAME = res.ROUTE_NAME
+                GROUP BY sia.ROUTE_NAME, res.expected_segments
+                HAVING COUNT(DISTINCT sia.segment_id) = res.expected_segments
+            )
+            SELECT s.*
+            FROM `{PROJECT_ID}.{county_dataset}.distress_segmented` s
+            INNER JOIN segments_in_all_years sia
+                ON s.ROUTE_NAME = sia.ROUTE_NAME
+                AND s.segment_id = sia.segment_id
+            WHERE s.ROUTE_NAME IN (SELECT ROUTE_NAME FROM routes_with_all_segments)
+            """
         client.query(complete_segments_query).result()
 
         # Log filtering statistics
@@ -677,8 +781,6 @@ def process_data(
                    -- Surface type should be consistent across years
                    MAX(surftype) AS surftype,
                    MAX(county_id) AS county_id,
-                   MAX(fclass) AS fclass,
-                   AVG(avg_width) AS avg_width,
                    COUNT(DISTINCT data_year) AS years_count,
                    {', '.join(iri_columns)},
                    {', '.join(index_columns)},
@@ -698,7 +800,7 @@ def process_data(
                -- Calculate length in feet (measures are in miles)
                ROUND((to_measure - from_measure) * 5280, 2) AS length_ft,
                from_lat, from_lon, to_lat, to_lon,
-               county_id, surftype, fclass, avg_width,
+               county_id, surftype,
                years_count, {', '.join([f"iri_{y}" for y in years])},
                {', '.join([f"index_{y}" for y in years])}
         FROM segment_consistency
@@ -736,14 +838,30 @@ def process_data(
         logger.info(f"   • Years processed: {years_list}")
         logger.info(f"   • Routes: {stats.unique_routes}")
         logger.info(f"   • Total segments: {stats.total_rows}")
-        logger.info(f"   • Segments per route: {num_segments}")
+        if segmentation_type == "fixed":
+            logger.info(f"   • Segments per route: {num_segments}")
+        else:
+            logger.info(f"   • Segment distance: {segment_distance} miles")
 
-        return {
+        # Store segmentation metadata in database
+        metadata_value = num_segments if segmentation_type == "fixed" else segment_distance
+        metadata_query = f"""
+        CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.segmentation_metadata` AS
+        SELECT
+            '{segmentation_type}' AS segmentation_type,
+            CAST({metadata_value} AS FLOAT64) AS segmentation_value,
+            '{years_list}' AS processed_years,
+            CURRENT_TIMESTAMP() AS created_at
+        """
+        client.query(metadata_query).result()
+        logger.info(f"✅ Stored segmentation metadata: type={segmentation_type}, value={metadata_value}")
+
+        result_data = {
             "status": "success",
             "message": f"Success! Processed {len(years)} years for {county_name}: {years_list}",
             "county": county_name,
             "dataset": county_dataset,
-            "num_segments": num_segments,
+            "segmentation_type": segmentation_type,
             "years_processed": years_list,
             "routes_processed": stats.unique_routes,
             "segments_created": stats.total_rows,
@@ -753,6 +871,13 @@ def process_data(
                 "expected_routes": stats.expected_routes
             }
         }
+
+        if segmentation_type == "fixed":
+            result_data["num_segments"] = num_segments
+        else:
+            result_data["segment_distance"] = segment_distance
+
+        return result_data
 
     except Exception as e:
         logger.error(f"Processing error: {str(e)}")
@@ -829,7 +954,7 @@ def get_results(
                 ROUTE_NAME, segment_id,
                 from_measure, to_measure, length_ft,
                 from_lat, from_lon, to_lat, to_lon,
-                county_id, surftype, fclass, avg_width,
+                county_id, surftype,
                 years_count, {iri_cols}, {index_cols}
             """
 
@@ -871,6 +996,26 @@ def get_results(
             logger.info(f"   • Sample row columns: {list(rows[0].keys())}")
             logger.info(f"   • First row route: {rows[0].get('route_name', 'N/A')}")
 
+        # Fetch segmentation metadata
+        metadata = None
+        try:
+            metadata_query = f"""
+            SELECT segmentation_type, segmentation_value, processed_years
+            FROM `{PROJECT_ID}.{county_dataset}.segmentation_metadata`
+            LIMIT 1
+            """
+            metadata_result = client.query(metadata_query).result()
+            metadata_rows = list(metadata_result)
+            if metadata_rows:
+                metadata = {
+                    "segmentation_type": metadata_rows[0].segmentation_type,
+                    "segmentation_value": metadata_rows[0].segmentation_value,
+                    "processed_years": metadata_rows[0].processed_years
+                }
+                logger.info(f"📋 Loaded metadata: {metadata}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load metadata: {e}")
+
         return {
             "status": "success",
             "county": county_name,
@@ -879,6 +1024,7 @@ def get_results(
             "limit": limit,
             "offset": offset,
             "selected_years": selected_years,
+            "metadata": metadata,
             "data": rows
         }
 
@@ -1045,4 +1191,4 @@ def clear_data(county_name: str = None):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8010)
+    uvicorn.run("main:app", host="0.0.0.0", port=8010)

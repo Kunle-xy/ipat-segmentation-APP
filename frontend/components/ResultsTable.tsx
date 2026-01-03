@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 
 interface ResultsTableProps {
   data: {
@@ -15,6 +15,7 @@ interface ResultsTableProps {
   selectedRows?: Set<number>
   onRowSelectionChange?: (selectedIndexes: Set<number>) => void
   onFilteredDataChange?: (filteredData: any[]) => void
+  searchTerm?: string
 }
 
 export default function ResultsTable({
@@ -24,10 +25,10 @@ export default function ResultsTable({
   selectedYears = [],
   selectedRows = new Set(),
   onRowSelectionChange,
-  onFilteredDataChange
+  onFilteredDataChange,
+  searchTerm = ''
 }: ResultsTableProps) {
   // ALL HOOKS MUST BE AT THE TOP
-  const [searchTerm, setSearchTerm] = useState('')
 
   // Check if IRI values are consistently increasing
   const hasIncreasingIRI = (row: any, iriColumns: string[]) => {
@@ -223,119 +224,70 @@ export default function ResultsTable({
   }, [searchTerm, filteredData])
 
   return (
-    <div className="space-y-4">
-      {/* Search Input */}
-      <div className="relative">
-        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-          <svg
-            className="h-5 w-5 text-gray-400"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-            />
-          </svg>
-        </div>
-        <input
-          type="text"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          placeholder="Search by route name..."
-          className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md leading-5 bg-white placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-        />
-        {searchTerm && (
-          <button
-            onClick={() => setSearchTerm('')}
-            className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600"
-            title="Clear search"
-          >
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        )}
-      </div>
-
+    <div className="h-full flex flex-col">
       {/* No Match Warning */}
       {searchHasNoMatches && (
-        <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded flex items-start gap-2">
-          <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+        <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 px-2 py-1.5 rounded flex items-start gap-1.5 text-xs mb-2">
+          <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
             <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
           </svg>
           <div>
-            <strong>No matches found for "{searchTerm}"</strong>
-            <p className="text-sm mt-1">Showing all results. Try a different search term or clear the search.</p>
+            <strong>No matches for "{searchTerm}"</strong>
           </div>
         </div>
       )}
 
-      <div className="flex justify-between items-center">
-        <div>
-          <p className="text-sm text-gray-600">
-            Showing <span className="font-semibold text-gray-900">{filteredData.length}</span> rows
-            {filteredData.length < data.data.length && !searchHasNoMatches && (
-              <span className="ml-2 text-blue-600 font-medium">
-                (filtered from {data.data.length} loaded)
-              </span>
-            )}
-            {searchHasNoMatches && (
-              <span className="ml-2 text-yellow-700 font-medium">
-                (all rows - no search match)
-              </span>
-            )}
-          </p>
+      {/* Header row */}
+      <div className="flex justify-between items-center mb-2 flex-shrink-0">
+        <p className="text-xs text-gray-600">
+          <span className="font-semibold text-gray-900">{filteredData.length}</span> rows
+          {filteredData.length < data.data.length && !searchHasNoMatches && (
+            <span className="ml-1 text-blue-600">(of {data.data.length})</span>
+          )}
           {data.total > data.data.length && (
-            <p className="text-xs text-gray-500 mt-1">
-              Total in database: {data.total} rows (showing all loaded rows)
-            </p>
+            <span className="ml-1 text-gray-500">• {data.total} total</span>
           )}
-          {data.total === data.data.length && (
-            <p className="text-xs text-green-600 mt-1">
-              ✓ All {data.total} rows loaded from database
-            </p>
-          )}
-        </div>
+        </p>
 
-        <div className="text-right">
-          <button
-            onClick={exportToCSV}
-            disabled={filteredData.length === 0}
-            className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors text-sm"
-            title="Download all visible rows with full precision (lat/lon: 8 decimals)"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            Download CSV ({filteredData.length} rows)
-          </button>
-          <p className="text-xs text-gray-500 mt-1">
-            Full precision export (coordinates: 8 decimals)
-          </p>
-        </div>
+        <button
+          onClick={exportToCSV}
+          disabled={filteredData.length === 0}
+          className="flex items-center gap-1.5 bg-green-600 text-white px-2.5 py-1 rounded hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors text-xs"
+          title="Download CSV"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          CSV
+        </button>
       </div>
 
-      <div className="overflow-auto border rounded-lg max-h-[500px]">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="sticky top-0 z-10 shadow-sm">
+      {/* Table container with VISIBLE scrollbar */}
+      <div
+        className="flex-1 border rounded-lg"
+        style={{
+          overflow: 'auto',
+          maxHeight: 'calc(100% - 40px)',
+          minHeight: '200px'
+        }}
+      >
+        <div style={{ width: '2000px', minWidth: '100%' }}>
+          <table className="w-full divide-y divide-gray-200">
+            <thead className="sticky top-0 z-[5] shadow-sm">
             <tr>
-              <th className="px-4 py-3 text-left bg-gray-50">
+              <th className="px-2 py-2 text-left bg-gray-50 sticky left-0 z-10">
                 <input
                   type="checkbox"
                   checked={selectedRows.size === filteredData.length && filteredData.length > 0}
                   onChange={handleSelectAll}
-                  className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 cursor-pointer"
+                  className="w-3 h-3 text-blue-600 border-gray-300 rounded focus:ring-blue-500 cursor-pointer"
                   title="Select all visible rows"
                 />
               </th>
               {otherColumns.map(column => (
                 <th
                   key={column}
-                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap bg-gray-50"
+                  className="px-2 py-2 text-left text-[10px] font-medium text-gray-500 uppercase tracking-tight whitespace-nowrap bg-gray-50"
                 >
                   {column.replace(/_/g, ' ')}
                 </th>
@@ -343,7 +295,7 @@ export default function ResultsTable({
               {iriColumns.map(column => (
                 <th
                   key={column}
-                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap bg-gray-50"
+                  className="px-2 py-2 text-left text-[10px] font-medium text-gray-500 uppercase tracking-tight whitespace-nowrap bg-gray-50"
                 >
                   {column.replace(/_/g, ' ')}
                 </th>
@@ -351,7 +303,7 @@ export default function ResultsTable({
               {indexColumns.map(column => (
                 <th
                   key={column}
-                  className="px-4 py-3 text-left text-xs font-medium text-blue-600 uppercase tracking-wider whitespace-nowrap bg-blue-50"
+                  className="px-2 py-2 text-left text-[10px] font-medium text-blue-600 uppercase tracking-tight whitespace-nowrap bg-blue-50"
                   title="Row indices used for this segment"
                 >
                   {column.replace(/_/g, ' ')}
@@ -364,37 +316,37 @@ export default function ResultsTable({
               const isIncreasing = hasIncreasingIRI(row, iriColumns)
               const isSelected = selectedRows.has(rowIndex)
               return (
-              <tr
-                key={rowIndex}
-                className={`hover:bg-gray-50 ${isIncreasing ? 'bg-green-50' : ''} ${isSelected ? 'bg-blue-100' : ''}`}
-                title={isIncreasing ? 'This route has consistent IRI increase' : ''}
-              >
-                <td className="px-4 py-3 text-center">
+                <tr
+                  key={rowIndex}
+                  className={`hover:bg-gray-50 ${isIncreasing ? 'bg-green-50' : ''} ${isSelected ? 'bg-blue-100' : ''}`}
+                  title={isIncreasing ? 'This route has consistent IRI increase' : ''}
+                >
+                  <td className="px-2 py-1 text-center sticky left-0 bg-white z-[1]">
                   <input
                     type="checkbox"
                     checked={isSelected}
                     onChange={() => handleRowToggle(rowIndex)}
-                    className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 cursor-pointer"
+                    className="w-3 h-3 text-blue-600 border-gray-300 rounded focus:ring-blue-500 cursor-pointer"
                   />
                 </td>
                 {otherColumns.map(column => (
                   <td
                     key={column}
-                    className="px-4 py-3 text-sm text-gray-900 whitespace-nowrap"
+                    className="px-2 py-1 text-[11px] text-gray-900 whitespace-nowrap"
                   >
                     {typeof row[column] === 'number'
                       ? column.includes('lat') || column.includes('lon')
-                        ? row[column].toFixed(8) // 8 decimal places for coordinates
+                        ? row[column].toFixed(8)
                         : column === 'length_ft'
-                        ? row[column].toFixed(2) // 2 decimal places for length in feet
-                        : row[column].toFixed(4) // 4 decimal places for other numbers
+                        ? row[column].toFixed(2)
+                        : row[column].toFixed(4)
                       : row[column]}
                   </td>
                 ))}
                 {iriColumns.map(column => (
                   <td
                     key={column}
-                    className="px-4 py-3 text-sm text-gray-900 whitespace-nowrap"
+                    className="px-2 py-1 text-[11px] text-gray-900 whitespace-nowrap"
                   >
                     {row[column] ? row[column].toFixed(4) : 'N/A'}
                   </td>
@@ -402,7 +354,7 @@ export default function ResultsTable({
                 {indexColumns.map(column => (
                   <td
                     key={column}
-                    className="px-4 py-3 text-sm text-blue-700 whitespace-nowrap bg-blue-50 font-mono"
+                    className="px-2 py-1 text-[11px] text-blue-700 whitespace-nowrap bg-blue-50 font-mono"
                     title={`Row indices: ${row[column] || 'N/A'}`}
                   >
                     {row[column] || 'N/A'}
@@ -413,6 +365,7 @@ export default function ResultsTable({
             })}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   )

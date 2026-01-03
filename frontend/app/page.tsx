@@ -2,9 +2,11 @@
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import dynamic from 'next/dynamic'
-import FileUpload from '@/components/FileUpload'
+import Header from '@/components/Header'
+import LeftWidget from '@/components/LeftWidget'
 import ResultsTable from '@/components/ResultsTable'
 import axios from 'axios'
+import { Table } from 'lucide-react'
 
 // Import MapView dynamically to avoid SSR issues with Leaflet
 const MapView = dynamic(() => import('@/components/MapView'), {
@@ -33,6 +35,8 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null)
   const [numSegments, setNumSegments] = useState(20)
   const [countyName, setCountyName] = useState('')
+  const [segmentationType, setSegmentationType] = useState<'fixed' | 'distance'>('fixed')
+  const [segmentDistance, setSegmentDistance] = useState(0.1)
 
   // New states for county dropdown and filters
   const [availableCounties, setAvailableCounties] = useState<string[]>([])
@@ -51,6 +55,11 @@ export default function Home() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [processedYears, setProcessedYears] = useState<string[]>([]) // Years used in segmentation
   const [isEditMode, setIsEditMode] = useState(false) // Allow changing year selection
+  const [showTable, setShowTable] = useState(false) // Toggle table view
+  const [tableHeight, setTableHeight] = useState(50) // Table height percentage (default 50%)
+  const [isResizingTable, setIsResizingTable] = useState(false)
+  const [searchTerm, setSearchTerm] = useState('') // Search term for table
+  const [segmentationMetadata, setSegmentationMetadata] = useState<any>(null) // Metadata from database
 
   // Get selected segments for map with IRI data (memoized to prevent infinite loops)
   const selectedSegments = useMemo(() => {
@@ -90,6 +99,7 @@ export default function Home() {
 
   // Ref for dropdown to detect outside clicks
   const dropdownRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -107,6 +117,45 @@ export default function Home() {
       document.removeEventListener('mousedown', handleClickOutside)
     }
   }, [showCountyDropdown])
+
+  // Handle table vertical resizing
+  const handleTableResizeStart = useCallback((e: React.MouseEvent) => {
+    setIsResizingTable(true)
+    e.preventDefault()
+  }, [])
+
+  const handleTableResize = useCallback((e: MouseEvent) => {
+    if (!isResizingTable || !containerRef.current) return
+
+    const containerRect = containerRef.current.getBoundingClientRect()
+    const mouseY = e.clientY - containerRect.top
+    const newHeightPercent = ((containerRect.height - mouseY) / containerRect.height) * 100
+
+    // Constrain between 20% and 80%
+    const constrainedHeight = Math.max(20, Math.min(80, newHeightPercent))
+    setTableHeight(constrainedHeight)
+  }, [isResizingTable])
+
+  const handleTableResizeEnd = useCallback(() => {
+    setIsResizingTable(false)
+  }, [])
+
+  // Add/remove mouse listeners for table resizing
+  useEffect(() => {
+    if (isResizingTable) {
+      document.addEventListener('mousemove', handleTableResize)
+      document.addEventListener('mouseup', handleTableResizeEnd)
+      document.body.style.cursor = 'ns-resize'
+      document.body.style.userSelect = 'none'
+
+      return () => {
+        document.removeEventListener('mousemove', handleTableResize)
+        document.removeEventListener('mouseup', handleTableResizeEnd)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+    }
+  }, [isResizingTable, handleTableResize, handleTableResizeEnd])
 
   const handleUploadAll = async (files: File[]) => {
     if (!countyName.trim()) {
@@ -197,31 +246,42 @@ export default function Home() {
     setSuccessMessage(null)
 
     try {
-      const response = await axios.post(`${API_URL}/process`, null, {
-        params: {
-          num_segments: numSegments,
-          county_name: countyName.trim().toLowerCase(),
-          selected_years: selectedYears.join(',')
-        }
-      })
+      const params: any = {
+        county_name: countyName.trim().toLowerCase(),
+        selected_years: selectedYears.join(','),
+        segmentation_type: segmentationType
+      }
+
+      if (segmentationType === 'fixed') {
+        params.num_segments = numSegments
+      } else {
+        params.segment_distance = segmentDistance
+      }
+
+      const response = await axios.post(`${API_URL}/process`, null, { params })
       setProcessStatus(response.data)
 
       // Automatically fetch results and tables after processing
       await fetchResults()
       fetchCountyTables()
 
+      // Automatically show table after successful processing
+      setShowTable(true)
+
       // Lock the processed years and exit edit mode
       setProcessedYears([...selectedYears])
       setIsEditMode(false)
 
-      // Show success message
+      // Show success message and alert
       const stats = response.data
-      setSuccessMessage(
-        `✅ Segmentation complete! Processed ${stats.routes_processed || stats.statistics?.unique_routes || 'N/A'} routes with ${stats.segments_created || stats.statistics?.total_rows || 'N/A'} total segments.`
-      )
+      const successMsg = `✅ Segmentation complete! Processed ${stats.routes_processed || stats.statistics?.unique_routes || 'N/A'} routes with ${stats.segments_created || stats.statistics?.total_rows || 'N/A'} total segments.`
+      setSuccessMessage(successMsg)
 
-      // Auto-hide success message after 5 seconds
-      setTimeout(() => setSuccessMessage(null), 5000)
+      // Show alert notification
+      alert(`🎉 Analysis Complete!\n\n${stats.routes_processed || stats.statistics?.unique_routes || 'N/A'} routes processed\n${stats.segments_created || stats.statistics?.total_rows || 'N/A'} total segments created\n\nYou can now view the results in the table below.`)
+
+      // Auto-hide success message after 8 seconds
+      setTimeout(() => setSuccessMessage(null), 8000)
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Processing failed')
       setLoading(false)
@@ -239,6 +299,14 @@ export default function Home() {
         }
       })
       setResults(response.data)
+      // Store metadata from database
+      console.log('📋 Metadata from API:', response.data.metadata)
+      if (response.data.metadata) {
+        setSegmentationMetadata(response.data.metadata)
+        console.log('✅ Metadata stored in state:', response.data.metadata)
+      } else {
+        console.warn('⚠️ No metadata returned from API')
+      }
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to fetch results')
     } finally {
@@ -284,6 +352,11 @@ export default function Home() {
       })
       setResults(response.data)
       setCountyHasTables(true)
+
+      // Store metadata from database
+      if (response.data.metadata) {
+        setSegmentationMetadata(response.data.metadata)
+      }
 
       // If we successfully loaded results, those years are now the processed years
       if (selectedYears.length >= 2) {
@@ -406,15 +479,19 @@ export default function Home() {
       return
     }
 
+    const segmentInfo = segmentationType === 'fixed'
+      ? `${numSegments} segments per route`
+      : `${segmentDistance} mile distance per segment`
+
     const confirmMsg = `🔄 FULL REPROCESSING WITH SELECTED YEARS\n\n` +
       `This will:\n` +
       `• Recreate all segmentation tables\n` +
       `• Apply overlapping segment logic for ${selectedYears.join(', ')}\n` +
-      `• Generate ${numSegments} segments per route\n` +
+      `• Generate ${segmentInfo}\n` +
       `• Only include routes with consecutive years in selection\n\n` +
       `County: ${countyName}\n` +
       `Years: ${selectedYears.join(', ')}\n` +
-      `Segments: ${numSegments}\n\n` +
+      `Segmentation: ${segmentInfo}\n\n` +
       `Continue?`
 
     if (!confirm(confirmMsg)) {
@@ -427,13 +504,19 @@ export default function Home() {
     console.log(`🔄 Starting full reprocessing for ${countyName} with years: ${selectedYears.join(', ')}`)
 
     try {
-      const response = await axios.post(`${API_URL}/process`, null, {
-        params: {
-          num_segments: numSegments,
-          county_name: countyName.trim().toLowerCase(),
-          selected_years: selectedYears.join(',')
-        }
-      })
+      const params: any = {
+        county_name: countyName.trim().toLowerCase(),
+        selected_years: selectedYears.join(','),
+        segmentation_type: segmentationType
+      }
+
+      if (segmentationType === 'fixed') {
+        params.num_segments = numSegments
+      } else {
+        params.segment_distance = segmentDistance
+      }
+
+      const response = await axios.post(`${API_URL}/process`, null, { params })
 
       console.log('✅ Reprocessing completed:', response.data)
       console.log('📋 Response details:', JSON.stringify(response.data, null, 2))
@@ -455,6 +538,11 @@ export default function Home() {
       })
       console.log('📊 Results fetched:', resultsResponse.data)
       setResults(resultsResponse.data)
+
+      // Store metadata from database
+      if (resultsResponse.data.metadata) {
+        setSegmentationMetadata(resultsResponse.data.metadata)
+      }
 
       // Clear selected rows since data has changed
       setSelectedRows(new Set())
@@ -515,441 +603,256 @@ export default function Home() {
   const successfulUploads = uploadedFiles.filter(f => f.status === 'success').length
 
   return (
-    <main className="min-h-screen bg-gray-50">
-      <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900">
-            IPAT Segmentation Analysis
-          </h1>
-          <p className="mt-2 text-gray-600">
-            Upload Excel files with pavement distress data and run dynamic segmentation analysis
-          </p>
-        </div>
+    <div className="h-screen flex flex-col bg-gray-50">
+      {/* Header */}
+      <Header />
 
-        {error && (
-          <div className="mb-6 bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded">
-            <strong>Error:</strong>
-            <div className="mt-1 whitespace-pre-line">{error}</div>
-          </div>
-        )}
+      {/* Main Content Area */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Left Widget */}
+        <LeftWidget
+          countyName={countyName}
+          setCountyName={setCountyName}
+          segmentationType={segmentationType}
+          setSegmentationType={setSegmentationType}
+          numSegments={numSegments}
+          setNumSegments={setNumSegments}
+          segmentDistance={segmentDistance}
+          setSegmentDistance={setSegmentDistance}
+          selectedYears={selectedYears}
+          setSelectedYears={setSelectedYears}
+          availableYears={availableYears}
+          countyTables={countyTables}
+          processedYears={processedYears}
+          isEditMode={isEditMode}
+          setIsEditMode={setIsEditMode}
+          loading={loading}
+          isUploading={isUploading}
+          uploadProgress={uploadProgress}
+          uploadedFiles={uploadedFiles}
+          handleUploadAll={handleUploadAll}
+          handleProcess={handleProcess}
+          handleLoadCountyData={handleLoadCountyData}
+          fetchCounties={fetchCounties}
+          availableCounties={availableCounties}
+          showCountyDropdown={showCountyDropdown}
+          setShowCountyDropdown={setShowCountyDropdown}
+          loadingCounties={loadingCounties}
+          toggleYearSelection={toggleYearSelection}
+          processStatus={processStatus}
+        />
 
-        {successMessage && (
-          <div className="mb-6 bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded flex items-start gap-3">
-            <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-            </svg>
-            <div className="flex-1">
-              <strong>Success!</strong>
-              <div className="mt-1">{successMessage}</div>
-            </div>
-            <button
-              onClick={() => setSuccessMessage(null)}
-              className="text-green-600 hover:text-green-800"
-            >
-              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-              </svg>
-            </button>
-          </div>
-        )}
+        {/* Right Content Area (Map + Optional Table) */}
+        <div ref={containerRef} className="flex-1 flex flex-col relative z-10">
+          {/* Success/Error Messages */}
+          <div className="absolute top-4 left-4 right-4 z-10 space-y-2">
+            {error && (
+              <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded shadow-lg">
+                <strong>Error:</strong>
+                <div className="mt-1 whitespace-pre-line">{error}</div>
+              </div>
+            )}
 
-        <div className="space-y-6">
-          <div className="bg-white shadow rounded-lg p-6">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-semibold">County Information</h2>
-              <div className="relative" ref={dropdownRef}>
+            {successMessage && (
+              <div className="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded shadow-lg flex items-start gap-3">
+                <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                </svg>
+                <div className="flex-1">
+                  <strong>Success!</strong>
+                  <div className="mt-1">{successMessage}</div>
+                </div>
                 <button
-                  onClick={fetchCounties}
-                  disabled={loadingCounties}
-                  className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-                  title="Load existing county data"
+                  onClick={() => setSuccessMessage(null)}
+                  className="text-green-600 hover:text-green-800"
                 >
-                  {loadingCounties ? (
-                    <svg className="animate-spin w-5 h-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                  ) : (
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
-                    </svg>
-                  )}
-                  {loadingCounties ? 'Loading...' : 'Load Data'}
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                  </svg>
                 </button>
-
-                {showCountyDropdown && availableCounties.length > 0 && (
-                  <div className="absolute right-0 mt-2 w-64 bg-white border border-gray-300 rounded-lg shadow-xl z-10 max-h-80 overflow-y-auto">
-                    <div className="p-2 border-b border-gray-200 bg-gray-50">
-                      <p className="text-sm font-semibold text-gray-700">Select County</p>
-                    </div>
-                    {availableCounties.map((county) => (
-                      <button
-                        key={county}
-                        onClick={() => handleLoadCountyData(county)}
-                        className="w-full text-left px-4 py-3 hover:bg-blue-50 border-b border-gray-100 last:border-b-0 transition-colors"
-                      >
-                        <span className="text-sm font-medium text-gray-900 capitalize">
-                          {county.replace(/_/g, ' ')}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {showCountyDropdown && availableCounties.length === 0 && !loadingCounties && (
-                  <div className="absolute right-0 mt-2 w-64 bg-white border border-gray-300 rounded-lg shadow-xl z-10 p-4">
-                    <p className="text-sm text-gray-600">No counties with data found</p>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="mb-6">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                County Name *
-              </label>
-              <input
-                type="text"
-                value={countyName}
-                onChange={(e) => setCountyName(e.target.value)}
-                placeholder="e.g., Polk, Linn, Scott, Johnson, Black Hawk"
-                disabled={loading}
-                className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-200"
-              />
-              <p className="mt-1 text-sm text-gray-500">
-                All uploaded tables and results will be saved under this county name. Or click "Load Data" to view existing counties.
-              </p>
-            </div>
-          </div>
-
-          <div className="bg-white shadow rounded-lg p-6">
-            <h2 className="text-xl font-semibold mb-4">Data Upload & Segmentation</h2>
-
-            {/* Upload Progress Bar */}
-            {isUploading && uploadProgress.total > 0 && (
-              <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-medium text-blue-900">
-                    Uploading {uploadProgress.current} of {uploadProgress.total} files
-                  </span>
-                  <span className="text-sm text-blue-700">
-                    {Math.round((uploadProgress.current / uploadProgress.total) * 100)}%
-                  </span>
-                </div>
-                <div className="w-full bg-blue-200 rounded-full h-2.5 mb-2">
-                  <div
-                    className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
-                    style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }}
-                  ></div>
-                </div>
-                <p className="text-xs text-blue-600">
-                  📁 {uploadProgress.currentFile}
-                </p>
-              </div>
-            )}
-
-            <FileUpload
-              onUploadAll={handleUploadAll}
-              disabled={loading || !countyName.trim()}
-              uploadedFiles={uploadedFiles}
-              isUploading={isUploading}
-            />
-
-            {successfulUploads >= 2 && (
-              <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded">
-                <p className="font-semibold text-green-800">
-                  ✓ {successfulUploads} files uploaded successfully for {countyName}
-                </p>
-                <p className="text-sm text-green-700 mt-1">
-                  Select years and segments below to run segmentation.
-                </p>
-              </div>
-            )}
-
-            {successfulUploads === 1 && !isUploading && (
-              <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded">
-                <p className="font-semibold text-yellow-800">
-                  ⚠ 1 file uploaded - you need at least 2 years of data
-                </p>
-                <p className="text-sm text-yellow-700 mt-1">
-                  Please upload at least one more file with a different year.
-                </p>
-              </div>
-            )}
-
-            {/* County Tables Info - Show if uploaded or loaded */}
-            {countyName && countyTables.length > 0 && (
-              <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold text-blue-900">
-                    📊 Uploaded Tables for {countyName.charAt(0).toUpperCase() + countyName.slice(1).replace(/_/g, ' ')}
-                    {processedYears.length > 0 && !isEditMode && (
-                      <span className="ml-2 text-xs font-normal text-green-700">
-                        (Locked to: {processedYears.join(', ')})
-                      </span>
-                    )}
-                  </h3>
-                  <div className="flex items-center gap-2">
-                    {processedYears.length > 0 && !isEditMode && (
-                      <button
-                        onClick={() => setIsEditMode(true)}
-                        disabled={loading}
-                        className="flex items-center gap-1 text-xs bg-orange-600 text-white px-3 py-1.5 rounded hover:bg-orange-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-                        title="Edit year selection and reprocess"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                        </svg>
-                        Edit
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <>
-                  <div className="mb-3">
-                    <p className="text-xs text-blue-700">
-                      {processedYears.length > 0 && !isEditMode
-                        ? '🔍 Filter results by year (toggle within processed years):'
-                        : 'Select years to process (minimum 2 years):'}
-                    </p>
-                    {isEditMode && processedYears.length > 0 && (
-                      <p className="text-xs text-orange-600 mt-1 font-semibold">
-                        ⚠️ Edit Mode: Changing years will reprocess the entire segmentation
-                      </p>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                    {countyTables
-                      .filter((table: any) => table.table_name.startsWith('raw_distress_'))
-                      .map((table: any) => {
-                        const year = table.table_name.replace('raw_distress_', '')
-                        const isSelected = selectedYears.includes(year)
-                        const isProcessed = processedYears.includes(year)
-                        const isDisabled = processedYears.length > 0 && !isEditMode && !isProcessed
-
-                        return (
-                          <label
-                            key={table.table_name}
-                            className={`px-3 py-2 rounded border-2 transition-all ${
-                              isDisabled
-                                ? 'cursor-not-allowed bg-gray-100 border-gray-300 opacity-50'
-                                : 'cursor-pointer bg-white ' + (
-                                  isSelected
-                                    ? 'border-blue-500 bg-blue-100'
-                                    : 'border-blue-300 hover:border-blue-400'
-                                )
-                            }`}
-                          >
-                            <div className="flex items-center gap-2">
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                disabled={isDisabled}
-                                onChange={() => toggleYearSelection(year)}
-                                className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 disabled:cursor-not-allowed"
-                              />
-                              <span className={`text-sm font-medium ${isDisabled ? 'text-gray-500' : 'text-blue-800'}`}>
-                                📅 {year}
-                                {isDisabled && (
-                                  <span className="ml-1 text-xs">🔒</span>
-                                )}
-                              </span>
-                            </div>
-                          </label>
-                        )
-                      })}
-                  </div>
-                  {isEditMode || processedYears.length === 0 ? (
-                    <>
-                      {selectedYears.length < 2 && (
-                        <p className="mt-2 text-xs text-red-600">
-                          ⚠️ Please select at least 2 years for processing (currently: {selectedYears.length})
-                        </p>
-                      )}
-                      {selectedYears.length >= 2 && (
-                        <p className="mt-2 text-xs text-blue-600">
-                          ✓ {selectedYears.length} year{selectedYears.length !== 1 ? 's' : ''} selected for processing
-                        </p>
-                      )}
-                    </>
-                  ) : (
-                    <p className="mt-2 text-xs text-green-600">
-                      🔍 Filtering results from processed years: {processedYears.join(', ')} (showing: {selectedYears.join(', ')})
-                    </p>
-                  )}
-                </>
-              </div>
-            )}
-
-            {/* Segmentation Settings - Show when tables available */}
-            {(successfulUploads >= 2 || countyHasTables) && (
-              <div className="mt-6">
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Number of Segments per Route
-                  </label>
-                  <input
-                    type="number"
-                    min="10"
-                    max="100"
-                    value={numSegments}
-                    onChange={(e) => setNumSegments(parseInt(e.target.value) || 20)}
-                    disabled={loading}
-                    className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-200"
-                  />
-                  <p className="mt-1 text-sm text-gray-500">
-                    Choose between 10 and 100 segments (default: 20)
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {isEditMode && processedYears.length > 0 && (
-                    <button
-                      onClick={() => {
-                        setIsEditMode(false)
-                        setSelectedYears([...processedYears])
-                      }}
-                      disabled={loading}
-                      className="flex items-center gap-1 bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-                      title="Cancel editing and restore previous selection"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                      Cancel
-                    </button>
-                  )}
-                  <button
-                    onClick={handleProcess}
-                    disabled={loading || !countyName.trim() || selectedYears.length < 2}
-                    className="flex items-center gap-2 bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-                    title={selectedYears.length < 2 ? 'Please select at least 2 years' : ''}
-                  >
-                    {loading && (
-                      <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                    )}
-                    {loading ? 'Processing...' : (isEditMode && processedYears.length > 0 ? 'Reprocess Segmentation' : 'Run Segmentation')}
-                  </button>
-                </div>
-
-                {selectedYears.length < 2 && countyTables.length > 0 && (
-                  <p className="mt-2 text-sm text-red-600">
-                    ⚠️ Please select at least 2 years to run segmentation
-                  </p>
-                )}
-
-                {processStatus && (
-                  <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded">
-                    <p className="font-semibold text-blue-800">
-                      {processStatus.message}
-                    </p>
-                    <div className="mt-2 text-sm text-blue-700">
-                      <p>County: {countyName}</p>
-                      <p>Segments per Route: {processStatus.num_segments}</p>
-                      <p>Total Rows: {processStatus.statistics?.total_rows}</p>
-                      <p>Unique Routes: {processStatus.statistics?.unique_routes}</p>
-                      <p>Expected Routes: {processStatus.statistics?.expected_routes}</p>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
           </div>
 
-          {results && (
-            <>
-              <div className="bg-white shadow rounded-lg p-6">
-                <h2 className="text-xl font-semibold mb-4">Result Filters</h2>
-
-                {/* Data Filters */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Surface Type
-                      </label>
-                      <select
-                        value={surfTypeFilter}
-                        onChange={(e) => setSurfTypeFilter(e.target.value)}
-                        className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                      >
-                        <option value="all">All Surface Types</option>
-                        {Array.from(new Set(results.data.map((row: any) => row.surftype)))
-                          .filter(Boolean)
-                          .sort()
-                          .map((surftype: any) => (
-                            <option key={surftype} value={surftype}>
-                              {surftype}
-                            </option>
-                          ))}
-                      </select>
-                    </div>
-
-                    <div className="flex items-end">
-                      <label className="flex items-center space-x-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={showIncreasingOnly}
-                          onChange={(e) => setShowIncreasingOnly(e.target.checked)}
-                          className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                        />
-                        <span className="text-sm font-medium text-gray-700">
-                          Show only routes with consistent IRI increase
-                        </span>
-                      </label>
-                    </div>
-                  </div>
-              </div>
-
-              {results && (
-                <div className="bg-white shadow rounded-lg p-6">
-                  <h2 className="text-xl font-semibold mb-4">Step 3: Results & Map</h2>
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    {/* Results Table */}
-                    <div>
-                      <ResultsTable
-                        key={`${results.total}-${results.data?.length || 0}-${selectedYears.join(',')}`}
-                        data={results}
-                        surfTypeFilter={surfTypeFilter}
-                        showIncreasingOnly={showIncreasingOnly}
-                        selectedYears={selectedYears}
-                        selectedRows={selectedRows}
-                        onRowSelectionChange={setSelectedRows}
-                        onFilteredDataChange={setFilteredData}
-                      />
-                    </div>
-
-                    {/* Map View */}
-                    <div className="h-[600px] border rounded-lg overflow-hidden">
-                      <MapView selectedSegments={selectedSegments as any} />
-                    </div>
-                  </div>
-                </div>
-              )}
-            </>
+          {/* Table Toggle Button */}
+          {results && !showTable && (
+            <button
+              onClick={() => setShowTable(true)}
+              className="absolute top-4 right-4 z-20 flex items-center gap-2 bg-white hover:bg-gray-50 text-gray-700 px-4 py-2 rounded-lg shadow-lg border border-gray-300 transition-colors"
+              title="Show table"
+            >
+              <Table className="h-5 w-5" />
+              <span className="text-sm font-medium">Show Table</span>
+            </button>
           )}
 
-          {successfulUploads >= 1 && (
-            <div className="bg-white shadow rounded-lg p-6">
+          {/* Hide Table Button - positioned above map */}
+          {showTable && results && (
+            <button
+              onClick={() => {
+                setShowTable(false)
+                setTableHeight(50) // Reset to default height
+              }}
+              style={{ pointerEvents: 'auto' }}
+              className="absolute top-4 right-4 z-[9999] flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2.5 rounded-lg shadow-2xl border-2 border-red-800 transition-all hover:scale-105 font-semibold"
+              title="Hide table and expand map to full view"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" />
+              </svg>
+              <span className="text-sm">Hide Table</span>
+            </button>
+          )}
+
+          {/* Map View */}
+          <div
+            style={{
+              height: showTable && results ? `${100 - tableHeight}%` : '100%',
+              transition: isResizingTable ? 'none' : 'height 300ms ease-in-out'
+            }}
+            className="relative"
+          >
+            <MapView selectedSegments={selectedSegments as any} />
+          </div>
+
+          {/* Results Table (shown when toggled and results exist) */}
+          {showTable && results && (
+            <>
+              {/* FIXED Close Button - Escapes all containers */}
               <button
-                onClick={handleClear}
-                disabled={loading}
-                className="flex items-center gap-2 bg-red-600 text-white px-6 py-2 rounded hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setShowTable(false)
+                  setTableHeight(50)
+                }}
+                className="fixed z-[99999] flex items-center justify-center w-10 h-10 bg-red-600 hover:bg-red-700 text-white rounded-full shadow-2xl transition-all hover:scale-110 border-2 border-white cursor-pointer"
+                style={{
+                  top: `calc(${100 - tableHeight}% + 65px)`,
+                  right: '20px',
+                  pointerEvents: 'auto'
+                }}
+                title="Close table and return to full map view"
               >
-                {loading && (
-                  <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                )}
-                {loading ? 'Clearing...' : 'Clear All Data'}
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
               </button>
-            </div>
+
+              {/* Resize Handle */}
+              <div
+                onMouseDown={handleTableResizeStart}
+                className="h-2 bg-gradient-to-b from-blue-500 to-blue-600 cursor-ns-resize hover:from-blue-600 hover:to-blue-700 active:from-blue-700 active:to-blue-800 transition-colors group relative z-[1000]"
+                title="Drag to resize table"
+              >
+                {/* Grip indicator */}
+                <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex justify-center">
+                  <div className="w-12 h-1 bg-white/50 rounded-full group-hover:bg-white/70 transition-colors" />
+                </div>
+              </div>
+
+              {/* Table Container */}
+              <div
+                style={{
+                  height: `${tableHeight}%`,
+                  transition: isResizingTable ? 'none' : 'height 300ms ease-in-out'
+                }}
+                className="bg-white relative w-full"
+              >
+                {/* Scrollable Table Content */}
+                <div className="h-full flex flex-col p-2">
+                  {/* Compact Header Row - Everything Aligned */}
+                  <div className="flex flex-wrap items-center gap-2 mb-1.5 pb-1.5 border-b border-gray-200">
+                    <h2 className="text-base font-semibold whitespace-nowrap">Results</h2>
+
+                    <select
+                      value={surfTypeFilter}
+                      onChange={(e) => setSurfTypeFilter(e.target.value)}
+                      className="text-xs px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="all">All Surface Types</option>
+                      {Array.from(new Set(results.data.map((row: any) => row.surftype)))
+                        .filter(Boolean)
+                        .sort()
+                        .map((surftype: any) => (
+                          <option key={surftype} value={surftype}>
+                            {surftype}
+                          </option>
+                        ))}
+                    </select>
+
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        checked={showIncreasingOnly}
+                        onChange={(e) => setShowIncreasingOnly(e.target.checked)}
+                        className="w-3 h-3 text-blue-600 border-gray-300 rounded"
+                        id="iri-increase-filter"
+                      />
+                      <label htmlFor="iri-increase-filter" className="text-xs text-gray-700 cursor-pointer whitespace-nowrap">
+                        IRI Increase
+                      </label>
+                    </div>
+
+                    {/* Search Input - Compact */}
+                    <div className="relative w-48">
+                      <div className="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none">
+                        <svg className="h-3 w-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                      </div>
+                      <input
+                        type="text"
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        placeholder="Search routes..."
+                        className="block w-full pl-7 pr-7 py-1 text-xs border border-gray-300 rounded leading-tight bg-white placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                      {searchTerm && (
+                        <button
+                          onClick={() => setSearchTerm('')}
+                          className="absolute inset-y-0 right-0 pr-2 flex items-center text-gray-400 hover:text-gray-600"
+                          title="Clear search"
+                        >
+                          <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Segmentation Metadata - Method Only (from database) */}
+                    {segmentationMetadata && (
+                      <div className="flex items-center gap-2 text-xs bg-blue-50 border border-blue-200 px-3 py-1 rounded shrink-0">
+                        <span className="font-semibold text-blue-900">Segmentation Method:</span>
+                        <span className="text-blue-700 font-semibold">
+                          {segmentationMetadata.segmentation_type === 'fixed'
+                            ? `Fixed (${Math.round(segmentationMetadata.segmentation_value)} segments per route)`
+                            : `Distance-Based (${segmentationMetadata.segmentation_value} mile${segmentationMetadata.segmentation_value !== 1 ? 's' : ''} per segment)`}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Table - Takes remaining space */}
+                  <div className="flex-1 min-h-0">
+                    <ResultsTable
+                      key={`${results.total}-${results.data?.length || 0}-${selectedYears.join(',')}`}
+                      data={results}
+                      surfTypeFilter={surfTypeFilter}
+                      showIncreasingOnly={showIncreasingOnly}
+                      selectedYears={selectedYears}
+                      selectedRows={selectedRows}
+                      onRowSelectionChange={setSelectedRows}
+                      onFilteredDataChange={setFilteredData}
+                      searchTerm={searchTerm}
+                    />
+                  </div>
+                </div>
+              </div>
+            </>
           )}
         </div>
       </div>
-    </main>
+    </div>
   )
 }

@@ -25,6 +25,7 @@ export default function MapView({ selectedSegments }: MapViewProps) {
   const mapRef = useRef<L.Map | null>(null)
   const mapContainerRef = useRef<HTMLDivElement>(null)
   const segmentLayersRef = useRef<L.Polyline[]>([])
+  const segmentIndexMapRef = useRef<Map<number, number>>(new Map()) // Maps segment_id to polyline index
   const [hoveredSegment, setHoveredSegment] = useState<MapSegment | null>(null)
   const [zoomEnabled, setZoomEnabled] = useState(true)
 
@@ -90,6 +91,7 @@ export default function MapView({ selectedSegments }: MapViewProps) {
       mapRef.current?.removeLayer(layer)
     })
     segmentLayersRef.current = []
+    segmentIndexMapRef.current.clear()
 
     if (selectedSegments.length === 0) return
 
@@ -98,6 +100,8 @@ export default function MapView({ selectedSegments }: MapViewProps) {
 
     // Add each segment as a line
     selectedSegments.forEach((segment, index) => {
+      // Store mapping of segment_id to polyline index
+      segmentIndexMapRef.current.set(segment.segment_id, index)
       const coords: L.LatLngExpression[] = [
         [segment.from_lat, segment.from_lon],
         [segment.to_lat, segment.to_lon]
@@ -171,6 +175,33 @@ export default function MapView({ selectedSegments }: MapViewProps) {
       mapRef.current.fitBounds(bounds, { padding: [50, 50] })
     }
   }, [selectedSegments])
+
+  // Update segment thickness when plot is shown/closed
+  useEffect(() => {
+    if (!mapRef.current || segmentLayersRef.current.length === 0) return
+
+    try {
+      // Reset all segments to default thickness
+      segmentLayersRef.current.forEach(polyline => {
+        if (polyline && mapRef.current?.hasLayer(polyline)) {
+          polyline.setStyle({ weight: 4, opacity: 0.8 })
+        }
+      })
+
+      // If a plot is shown, increase thickness for that specific segment
+      if (hoveredSegment) {
+        const polylineIndex = segmentIndexMapRef.current.get(hoveredSegment.segment_id)
+        if (polylineIndex !== undefined && segmentLayersRef.current[polylineIndex]) {
+          const targetPolyline = segmentLayersRef.current[polylineIndex]
+          if (targetPolyline && mapRef.current?.hasLayer(targetPolyline)) {
+            targetPolyline.setStyle({ weight: 8, opacity: 1 })
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('Error updating segment thickness:', error)
+    }
+  }, [hoveredSegment])
 
   return (
     <div className="relative h-full">

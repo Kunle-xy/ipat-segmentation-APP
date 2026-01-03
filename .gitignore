@@ -1,45 +1,98 @@
+# ====================================
+# Environment and Secrets
+# ====================================
+.env
+.env.local
+.env.*.local
+*.env
+
+# GCP Credentials
+gcp-service-account.json
+*-service-account.json
+google-credentials.json
+*.pem
+*.key
+
+# ====================================
 # Python
+# ====================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
+*.egg-info/
+dist/
+build/
+*.egg
 venv/
 ENV/
-*.egg-info/
-.pytest_cache/
+env/
+.venv/
 
-# Node
+# ====================================
+# Node / Frontend
+# ====================================
 node_modules/
 .next/
 out/
-build/
 dist/
-*.log
+build/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
-# Environment
-.env
-.env.local
-.env.*.local
-
-# GCP Credentials
-**/gcp-service-account.json
-**/*credentials*.json
-
-# Database
-*.db
-*.sqlite
-
+# ====================================
 # IDEs
+# ====================================
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# OS
+*~
 .DS_Store
 Thumbs.db
 
+# ====================================
+# Logs
+# ====================================
+*.log
+logs/
+
+# ====================================
+# Testing
+# ====================================
+.coverage
+htmlcov/
+.pytest_cache/
+coverage/
+
+# ====================================
+# Database
+# ====================================
+*.db
+*.sqlite
+
+# ====================================
 # Docker
-postgres_data/
+# ====================================
+*.tar
+*.gz
+
+# ====================================
+# Temporary
+# ====================================
+tmp/
+temp/
+*.tmp
+*.bak
+*.backup
+
+# ====================================
+# OS
+# ====================================
+.DS_Store
+Thumbs.db
+*.swp

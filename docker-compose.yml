@@ -1,52 +1,73 @@
 version: '3.8'
 
 services:
-  db:
-    image: postgres:15
-    container_name: ipat-postgres
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ipat_db
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: ipat-backend
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/ipat_db
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
+      - GCP_DATASET_ID=${GCP_DATASET_ID:-ipat_dataset}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcp-service-account.json}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3010}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     ports:
-      - "8010:8010"
-    depends_on:
-      db:
-        condition: service_healthy
+      - "${BACKEND_PORT:-8010}:8010"
     volumes:
+      # Mount backend code for development hot-reload
       - ./backend:/app
-    command: uvicorn main:app --host 0.0.0.0 --port 8010 --reload
+      # Mount GCP credentials (ensure this file exists)
+      - ./backend/gcp-service-account.json:/app/gcp-service-account.json:ro
+    command: >
+      uvicorn main:app
+      --host ${BACKEND_HOST:-0.0.0.0}
+      --port 8010
+      --reload=${BACKEND_RELOAD:-true}
+      --log-level ${LOG_LEVEL:-info}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - ipat-network
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8010}
     container_name: ipat-frontend
+    env_file:
+      - .env
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8010
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8010}
+      - NODE_ENV=${NODE_ENV:-development}
     ports:
-      - "3010:3010"
-    depends_on:
-      - backend
+      - "${FRONTEND_PORT:-3010}:3010"
     volumes:
+      # Mount frontend code for development hot-reload
       - ./frontend:/app
+      # Prevent node_modules and .next from being overwritten
       - /app/node_modules
       - /app/.next
-    command: npm run dev
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ipat-network
 
-volumes:
-  postgres_data:
+networks:
+  ipat-network:
+    driver: bridge
+    name: ipat-network
+
+# Note: This setup uses Google BigQuery as the database
+# No local database container is needed
