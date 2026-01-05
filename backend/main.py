@@ -770,11 +770,12 @@ def process_data(
         CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.distress_final` AS
         WITH segment_consistency AS (
             SELECT ROUTE_NAME, segment_id,
-                   -- Use averaged coordinates across all years for better accuracy
-                   AVG(from_lat) AS from_lat,
-                   AVG(from_lon) AS from_lon,
-                   AVG(to_lat) AS to_lat,
-                   AVG(to_lon) AS to_lon,
+                   -- Use MIN for start coordinates (earliest point) and MAX for end coordinates (latest point)
+                   -- This ensures the segment spans the full extent across all years
+                   MIN(from_lat) AS from_lat,
+                   MIN(from_lon) AS from_lon,
+                   MAX(to_lat) AS to_lat,
+                   MAX(to_lon) AS to_lon,
                    -- Use consistent segment measures (should be same across all years)
                    AVG(segment_from_measure) AS from_measure,
                    AVG(segment_to_measure) AS to_measure,
