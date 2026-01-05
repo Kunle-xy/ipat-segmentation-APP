@@ -21,6 +21,12 @@ help:
 	@echo "  make restart      - Restart all services"
 	@echo "  make down         - Stop all services"
 	@echo ""
+	@echo "$(GREEN)Testing Commands:$(NC)"
+	@echo "  make test         - Run all tests (backend + frontend)"
+	@echo "  make test-backend - Run backend tests only"
+	@echo "  make test-frontend- Run frontend tests only"
+	@echo "  make lint         - Run linting (backend + frontend)"
+	@echo ""
 	@echo "$(GREEN)Production Commands:$(NC)"
 	@echo "  make prod         - Start in production mode"
 	@echo "  make prod-down    - Stop production services"
@@ -177,3 +183,55 @@ update:
 	git pull
 	docker compose up --build -d
 	@echo "$(GREEN)✓ Update complete!$(NC)"
+
+# ================================
+# Testing Commands
+# ================================
+
+## test: Run all tests
+test: test-backend test-frontend
+	@echo "$(GREEN)✓ All tests complete!$(NC)"
+
+## test-backend: Run backend tests
+test-backend:
+	@echo "$(BLUE)Running backend tests...$(NC)"
+	cd backend && pip install -q pytest pytest-cov && pytest tests/ -v --tb=short
+	@echo "$(GREEN)✓ Backend tests complete!$(NC)"
+
+## test-frontend: Run frontend tests
+test-frontend:
+	@echo "$(BLUE)Running frontend tests...$(NC)"
+	cd frontend && npm test -- --passWithNoTests
+	@echo "$(GREEN)✓ Frontend tests complete!$(NC)"
+
+## test-backend-cov: Run backend tests with coverage
+test-backend-cov:
+	@echo "$(BLUE)Running backend tests with coverage...$(NC)"
+	cd backend && pytest tests/ --cov=. --cov-report=term-missing --cov-report=html
+
+## test-frontend-cov: Run frontend tests with coverage
+test-frontend-cov:
+	@echo "$(BLUE)Running frontend tests with coverage...$(NC)"
+	cd frontend && npm run test:coverage
+
+## lint: Run linting on backend and frontend
+lint: lint-backend lint-frontend
+	@echo "$(GREEN)✓ Linting complete!$(NC)"
+
+## lint-backend: Run backend linting
+lint-backend:
+	@echo "$(BLUE)Linting backend...$(NC)"
+	cd backend && pip install -q flake8 black && flake8 . --max-line-length=127 --exclude=__pycache__,tests && black --check .
+	@echo "$(GREEN)✓ Backend linting complete!$(NC)"
+
+## lint-frontend: Run frontend linting
+lint-frontend:
+	@echo "$(BLUE)Linting frontend...$(NC)"
+	cd frontend && npm run lint
+	@echo "$(GREEN)✓ Frontend linting complete!$(NC)"
+
+## format: Auto-format code
+format:
+	@echo "$(BLUE)Formatting code...$(NC)"
+	cd backend && pip install -q black && black .
+	@echo "$(GREEN)✓ Code formatted!$(NC)"
