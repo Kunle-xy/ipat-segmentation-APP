@@ -6,7 +6,7 @@ import Header from '@/components/Header'
 import LeftWidget from '@/components/LeftWidget'
 import ResultsTable from '@/components/ResultsTable'
 import axios from 'axios'
-import { Table } from 'lucide-react'
+import { Table, Download } from 'lucide-react'
 
 // Import MapView dynamically to avoid SSR issues with Leaflet
 const MapView = dynamic(() => import('@/components/MapView'), {
@@ -60,6 +60,8 @@ export default function Home() {
   const [isResizingTable, setIsResizingTable] = useState(false)
   const [searchTerm, setSearchTerm] = useState('') // Search term for table
   const [segmentationMetadata, setSegmentationMetadata] = useState<any>(null) // Metadata from database
+  const [showAnalysisCompleteModal, setShowAnalysisCompleteModal] = useState(false)
+  const [analysisCompleteData, setAnalysisCompleteData] = useState<any>(null)
 
   // Get selected segments for map with IRI data (memoized to prevent infinite loops)
   const selectedSegments = useMemo(() => {
@@ -272,13 +274,17 @@ export default function Home() {
       setProcessedYears([...selectedYears])
       setIsEditMode(false)
 
-      // Show success message and alert
+      // Show success message and custom modal
       const stats = response.data
       const successMsg = `✅ Segmentation complete! Processed ${stats.routes_processed || stats.statistics?.unique_routes || 'N/A'} routes with ${stats.segments_created || stats.statistics?.total_rows || 'N/A'} total segments.`
       setSuccessMessage(successMsg)
 
-      // Show alert notification
-      alert(`🎉 Analysis Complete!\n\n${stats.routes_processed || stats.statistics?.unique_routes || 'N/A'} routes processed\n${stats.segments_created || stats.statistics?.total_rows || 'N/A'} total segments created\n\nYou can now view the results in the table below.`)
+      // Show custom analysis complete modal
+      setAnalysisCompleteData({
+        routesProcessed: stats.routes_processed || stats.statistics?.unique_routes || 'N/A',
+        segmentsCreated: stats.segments_created || stats.statistics?.total_rows || 'N/A'
+      })
+      setShowAnalysisCompleteModal(true)
 
       // Auto-hide success message after 8 seconds
       setTimeout(() => setSuccessMessage(null), 8000)
@@ -465,6 +471,54 @@ export default function Home() {
 
       return newYears
     })
+  }
+
+  // Export filtered data to CSV
+  const handleExportCSV = () => {
+    if (!filteredData || filteredData.length === 0) {
+      alert('No data to export. Please ensure you have results displayed.')
+      return
+    }
+
+    // Get all column keys from the first row
+    const headers = Object.keys(filteredData[0])
+
+    // Create CSV header row
+    const csvHeaders = headers.join(',')
+
+    // Create CSV data rows
+    const csvRows = filteredData.map(row => {
+      return headers.map(header => {
+        const value = row[header]
+        // Handle null/undefined values and escape quotes
+        if (value === null || value === undefined) return ''
+        const stringValue = String(value)
+        // Escape quotes and wrap in quotes if contains comma, quote, or newline
+        if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+          return `"${stringValue.replace(/"/g, '""')}"`
+        }
+        return stringValue
+      }).join(',')
+    })
+
+    // Combine headers and rows
+    const csvContent = [csvHeaders, ...csvRows].join('\n')
+
+    // Create blob and download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const link = document.createElement('a')
+    const url = URL.createObjectURL(blob)
+
+    // Generate filename with timestamp
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
+    const filename = `ipat-results-${countyName || 'export'}-${timestamp}.csv`
+
+    link.setAttribute('href', url)
+    link.setAttribute('download', filename)
+    link.style.visibility = 'hidden'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
   }
 
   // Reprocess with selected years only - FULL SEGMENTATION
@@ -678,7 +732,7 @@ export default function Home() {
           {results && !showTable && (
             <button
               onClick={() => setShowTable(true)}
-              className="absolute top-4 right-4 z-20 flex items-center gap-2 bg-white hover:bg-gray-50 text-gray-700 px-4 py-2 rounded-lg shadow-lg border border-gray-300 transition-colors"
+              className="absolute top-2 right-2 z-[1001] flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg shadow-lg border border-green-700 transition-colors font-medium"
               title="Show table"
             >
               <Table className="h-5 w-5" />
@@ -694,11 +748,11 @@ export default function Home() {
                 setTableHeight(50) // Reset to default height
               }}
               style={{ pointerEvents: 'auto' }}
-              className="absolute top-4 right-4 z-[9999] flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2.5 rounded-lg shadow-2xl border-2 border-red-800 transition-all hover:scale-105 font-semibold"
+              className="fixed top-20 right-4 z-[99999] flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2.5 rounded-lg shadow-2xl border-2 border-red-800 transition-all hover:scale-105 font-semibold"
               title="Hide table and expand map to full view"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
               </svg>
               <span className="text-sm">Hide Table</span>
             </button>
@@ -718,26 +772,6 @@ export default function Home() {
           {/* Results Table (shown when toggled and results exist) */}
           {showTable && results && (
             <>
-              {/* FIXED Close Button - Escapes all containers */}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setShowTable(false)
-                  setTableHeight(50)
-                }}
-                className="fixed z-[99999] flex items-center justify-center w-10 h-10 bg-red-600 hover:bg-red-700 text-white rounded-full shadow-2xl transition-all hover:scale-110 border-2 border-white cursor-pointer"
-                style={{
-                  top: `calc(${100 - tableHeight}% + 65px)`,
-                  right: '20px',
-                  pointerEvents: 'auto'
-                }}
-                title="Close table and return to full map view"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-
               {/* Resize Handle */}
               <div
                 onMouseDown={handleTableResizeStart}
@@ -760,8 +794,8 @@ export default function Home() {
               >
                 {/* Scrollable Table Content */}
                 <div className="h-full flex flex-col p-2">
-                  {/* Compact Header Row - Everything Aligned */}
-                  <div className="flex flex-wrap items-center gap-2 mb-1.5 pb-1.5 border-b border-gray-200">
+                  {/* Single Row: Title + Filters + Export */}
+                  <div className="flex flex-wrap items-center gap-2 mb-1 pb-1 border-b border-gray-200">
                     <h2 className="text-base font-semibold whitespace-nowrap">Results</h2>
 
                     <select
@@ -831,6 +865,16 @@ export default function Home() {
                         </span>
                       </div>
                     )}
+
+                    {/* Export to CSV Button - Next to Segmentation Metadata */}
+                    <button
+                      onClick={handleExportCSV}
+                      className="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-xs font-semibold transition-colors shadow-sm"
+                      title="Export filtered results to CSV"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      <span>Export CSV</span>
+                    </button>
                   </div>
 
                   {/* Table - Takes remaining space */}
@@ -853,6 +897,47 @@ export default function Home() {
           )}
         </div>
       </div>
+
+      {/* Analysis Complete Modal */}
+      {showAnalysisCompleteModal && analysisCompleteData && (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-[100000]">
+          <div className="bg-gradient-to-b from-slate-900 to-slate-800 text-slate-100 rounded-lg shadow-2xl p-6 max-w-lg w-full mx-4 ring-1 ring-inset ring-slate-700/50">
+            <div className="border-b border-slate-700 pb-4 mb-4">
+              <h2 className="text-2xl font-semibold">Analysis Complete</h2>
+            </div>
+
+            <div className="space-y-4 mb-6">
+              <div className="p-4 bg-green-900/20 border border-green-700 rounded-lg">
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <p className="text-slate-400 mb-1">Routes Processed</p>
+                    <p className="text-2xl font-bold text-green-400">{analysisCompleteData.routesProcessed}</p>
+                  </div>
+                  <div>
+                    <p className="text-slate-400 mb-1">Segments Created</p>
+                    <p className="text-2xl font-bold text-green-400">{analysisCompleteData.segmentsCreated}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 bg-blue-900/20 border border-blue-700 rounded-lg">
+                <p className="text-sm text-slate-300">
+                  The segmentation analysis has been completed successfully. You can now view and interact with the results in the table below.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowAnalysisCompleteModal(false)}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-semibold transition-colors shadow-lg"
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

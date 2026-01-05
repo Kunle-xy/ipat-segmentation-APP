@@ -26,6 +26,7 @@ export default function MapView({ selectedSegments }: MapViewProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null)
   const segmentLayersRef = useRef<L.Polyline[]>([])
   const segmentIndexMapRef = useRef<Map<number, number>>(new Map()) // Maps segment_id to polyline index
+  const whiteOutlineRef = useRef<L.Polyline | null>(null) // White outline for selected segment
   const [hoveredSegment, setHoveredSegment] = useState<MapSegment | null>(null)
   const [zoomEnabled, setZoomEnabled] = useState(true)
 
@@ -119,13 +120,26 @@ export default function MapView({ selectedSegments }: MapViewProps) {
         opacity: 0.8
       }).addTo(mapRef.current!)
 
+      // Store segment data directly on the polyline for easy access
+      ;(polyline as any)._segmentData = segment
+
       // Add hover effect for visual feedback
+      // Note: The selected segment (showing IRI) will maintain its bold style
+      // due to the useEffect below that runs when hoveredSegment changes
       polyline.on('mouseover', () => {
-        polyline.setStyle({ weight: 6, opacity: 1 })
+        // Check current style - if already bold (weight >= 10), don't change on hover
+        const currentWeight = polyline.options.weight
+        if (currentWeight && currentWeight < 10) {
+          polyline.setStyle({ weight: 6, opacity: 1 })
+        }
       })
 
       polyline.on('mouseout', () => {
-        polyline.setStyle({ weight: 4, opacity: 0.8 })
+        // Check current style - if already bold (weight >= 10), don't reset on mouseout
+        const currentWeight = polyline.options.weight
+        if (currentWeight && currentWeight < 10) {
+          polyline.setStyle({ weight: 4, opacity: 0.8 })
+        }
       })
 
       // Add popup with segment info and Show Plot button
@@ -181,23 +195,51 @@ export default function MapView({ selectedSegments }: MapViewProps) {
     if (!mapRef.current || segmentLayersRef.current.length === 0) return
 
     try {
-      // Reset all segments to default thickness
+      // Remove existing white outline if any
+      if (whiteOutlineRef.current && mapRef.current.hasLayer(whiteOutlineRef.current)) {
+        mapRef.current.removeLayer(whiteOutlineRef.current)
+        whiteOutlineRef.current = null
+      }
+
+      // Iterate through all polylines and update their styling based on whether they're showing IRI
       segmentLayersRef.current.forEach(polyline => {
-        if (polyline && mapRef.current?.hasLayer(polyline)) {
+        if (!polyline || !mapRef.current?.hasLayer(polyline)) return
+
+        const segmentData = (polyline as any)._segmentData as MapSegment | undefined
+
+        // If this is the segment showing IRI plot, make it bold
+        // Must match BOTH route_name AND segment_id for unique identification
+        if (hoveredSegment && segmentData &&
+            segmentData.route_name === hoveredSegment.route_name &&
+            segmentData.segment_id === hoveredSegment.segment_id) {
+
+          // Create white outline underneath the colored line
+          const coords: L.LatLngExpression[] = [
+            [segmentData.from_lat, segmentData.from_lon],
+            [segmentData.to_lat, segmentData.to_lon]
+          ]
+
+          const whiteOutline = L.polyline(coords, {
+            color: '#FFFFFF',
+            weight: 16, // Slightly larger than the colored line (12)
+            opacity: 1,
+            className: 'white-segment-outline'
+          })
+
+          // Add white outline first (underneath)
+          whiteOutline.addTo(mapRef.current!)
+          // Then bring the colored polyline to front
+          polyline.bringToFront()
+
+          whiteOutlineRef.current = whiteOutline
+
+          // Make the line much bolder when showing IRI plot
+          polyline.setStyle({ weight: 12, opacity: 1 })
+        } else {
+          // Reset to default thickness
           polyline.setStyle({ weight: 4, opacity: 0.8 })
         }
       })
-
-      // If a plot is shown, increase thickness for that specific segment
-      if (hoveredSegment) {
-        const polylineIndex = segmentIndexMapRef.current.get(hoveredSegment.segment_id)
-        if (polylineIndex !== undefined && segmentLayersRef.current[polylineIndex]) {
-          const targetPolyline = segmentLayersRef.current[polylineIndex]
-          if (targetPolyline && mapRef.current?.hasLayer(targetPolyline)) {
-            targetPolyline.setStyle({ weight: 8, opacity: 1 })
-          }
-        }
-      }
     } catch (error) {
       console.warn('Error updating segment thickness:', error)
     }
@@ -243,8 +285,8 @@ export default function MapView({ selectedSegments }: MapViewProps) {
 
       {/* Segment counter */}
       {selectedSegments.length > 0 && (
-        <div className="absolute top-2 right-2 bg-white px-3 py-2 rounded shadow-lg z-[1000] text-sm">
-          <p className="font-semibold text-gray-900">
+        <div className="absolute top-14 right-2 bg-blue-600 text-white px-3 py-2 rounded shadow-lg z-[1000] text-sm">
+          <p className="font-semibold">
             {selectedSegments.length} segment{selectedSegments.length !== 1 ? 's' : ''} selected
           </p>
         </div>
