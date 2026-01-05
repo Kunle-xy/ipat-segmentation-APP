@@ -5,13 +5,23 @@ FROM node:18-alpine AS base
 WORKDIR /app
 
 # ====================================
-# Dependencies stage
+# Dependencies stage (production only)
 # ====================================
 FROM base AS deps
 
-# Install dependencies
+# Install production dependencies only
 COPY package*.json ./
-RUN npm ci --only=production && \
+RUN npm ci --omit=dev && \
+    npm cache clean --force
+
+# ====================================
+# Build dependencies stage (includes devDependencies)
+# ====================================
+FROM base AS build-deps
+
+# Install ALL dependencies (including devDependencies for build)
+COPY package*.json ./
+RUN npm ci && \
     npm cache clean --force
 
 # ====================================
@@ -39,11 +49,14 @@ CMD ["npm", "run", "dev"]
 # ====================================
 FROM base AS builder
 
-# Copy dependencies from deps stage
-COPY --from=deps /app/node_modules ./node_modules
+# Copy dependencies from build-deps stage (includes devDependencies)
+COPY --from=build-deps /app/node_modules ./node_modules
 
 # Copy application code
 COPY . .
+
+# Create public folder if it doesn't exist (Next.js optional)
+RUN mkdir -p public
 
 # Set build-time environment variables
 ARG NEXT_PUBLIC_API_URL
