@@ -7,6 +7,70 @@ import LeftWidget from '@/components/LeftWidget'
 import ResultsTable from '@/components/ResultsTable'
 import axios from 'axios'
 import { Table, Download } from 'lucide-react'
+import ErrorBoundary from '@/components/ErrorBoundary'
+
+interface ProcessStatus {
+  status: string
+  message: string
+  county: string
+  dataset: string
+  segmentation_type: 'fixed' | 'distance'
+  years_processed: string
+  routes_processed: number
+  segments_created: number
+  statistics: {
+    total_rows: number
+    unique_routes: number
+    expected_routes: number
+  }
+  num_segments?: number
+  segment_distance?: number
+}
+
+interface DataRow {
+  ROUTE_NAME: string
+  segment_id: number
+  from_measure: number
+  to_measure: number
+  length_ft: number
+  from_lat: number
+  from_lon: number
+  to_lat: number
+  to_lon: number
+  county_id: string | number
+  surftype: string
+  years_count: number
+  [key: string]: string | number | null
+}
+
+interface SegmentationMetadata {
+  segmentation_type: 'fixed' | 'distance'
+  segmentation_value: number
+  processed_years: string
+}
+
+interface ResultsResponse {
+  status: string
+  county: string
+  dataset: string
+  total: number
+  limit: number
+  offset: number
+  selected_years: string | null
+  metadata: SegmentationMetadata | null
+  data: DataRow[]
+}
+
+interface CountyTable {
+  table_name: string
+  dataset: string
+  county: string
+}
+
+interface AnalysisCompleteData {
+  routesProcessed: number | string
+  segmentsCreated: number | string
+}
 
 // Import MapView dynamically to avoid SSR issues with Leaflet
 const MapView = dynamic(() => import('@/components/MapView'), {
@@ -28,8 +92,8 @@ interface UploadedFile {
 
 export default function Home() {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
-  const [processStatus, setProcessStatus] = useState<any>(null)
-  const [results, setResults] = useState<any>(null)
+  const [processStatus, setProcessStatus] = useState<ProcessStatus | null>(null)
+  const [results, setResults] = useState<ResultsResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -44,13 +108,13 @@ export default function Home() {
   const [loadingCounties, setLoadingCounties] = useState(false)
   const [surfTypeFilter, setSurfTypeFilter] = useState<string>('all')
   const [showIncreasingOnly, setShowIncreasingOnly] = useState(false)
-  const [countyTables, setCountyTables] = useState<any[]>([])
+  const [countyTables, setCountyTables] = useState<CountyTable[]>([])
   const [loadingTables, setLoadingTables] = useState(false)
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0, currentFile: '' })
   const [selectedYears, setSelectedYears] = useState<string[]>([])
   const [availableYears, setAvailableYears] = useState<string[]>([])
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set())
-  const [filteredData, setFilteredData] = useState<any[]>([])
+  const [filteredData, setFilteredData] = useState<DataRow[]>([])
   const [countyHasTables, setCountyHasTables] = useState(false)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [processedYears, setProcessedYears] = useState<string[]>([]) // Years used in segmentation
@@ -59,9 +123,9 @@ export default function Home() {
   const [tableHeight, setTableHeight] = useState(50) // Table height percentage (default 50%)
   const [isResizingTable, setIsResizingTable] = useState(false)
   const [searchTerm, setSearchTerm] = useState('') // Search term for table
-  const [segmentationMetadata, setSegmentationMetadata] = useState<any>(null) // Metadata from database
+  const [segmentationMetadata, setSegmentationMetadata] = useState<SegmentationMetadata | null>(null)
   const [showAnalysisCompleteModal, setShowAnalysisCompleteModal] = useState(false)
-  const [analysisCompleteData, setAnalysisCompleteData] = useState<any>(null)
+  const [analysisCompleteData, setAnalysisCompleteData] = useState<AnalysisCompleteData | null>(null)
 
   // Get selected segments for map with IRI data (memoized to prevent infinite loops)
   const selectedSegments = useMemo(() => {
@@ -77,10 +141,10 @@ export default function Home() {
       iriColumns.forEach(col => {
         const year = col.replace('iri_', '')
         const iriValue = row[col]
-        if (iriValue !== null && iriValue !== undefined && !isNaN(iriValue)) {
+        if (iriValue !== null && iriValue !== undefined && !isNaN(Number(iriValue))) {
           iriData.push({
-            year: year,
-            iri: parseFloat(iriValue)
+            year: String(year),
+            iri: Number(iriValue)
           })
         }
       })
@@ -407,8 +471,8 @@ export default function Home() {
 
       // Extract years from raw_distress tables
       const years = tables
-        .filter((table: any) => table.table_name.startsWith('raw_distress_'))
-        .map((table: any) => table.table_name.replace('raw_distress_', ''))
+        .filter((table: CountyTable) => table.table_name.startsWith('raw_distress_'))
+        .map((table: CountyTable) => table.table_name.replace('raw_distress_', ''))
         .sort()
 
       setAvailableYears(years)
@@ -519,6 +583,7 @@ export default function Home() {
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+    URL.revokeObjectURL(url)
   }
 
   // Reprocess with selected years only - FULL SEGMENTATION
@@ -657,6 +722,7 @@ export default function Home() {
   const successfulUploads = uploadedFiles.filter(f => f.status === 'success').length
 
   return (
+    <ErrorBoundary>
     <div className="h-screen flex flex-col bg-gray-50">
       {/* Header */}
       <Header />
@@ -804,10 +870,10 @@ export default function Home() {
                       className="text-xs px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
                     >
                       <option value="all">All Surface Types</option>
-                      {Array.from(new Set(results.data.map((row: any) => row.surftype)))
+                      {Array.from(new Set(results.data.map((row: DataRow) => row.surftype)))
                         .filter(Boolean)
                         .sort()
-                        .map((surftype: any) => (
+                        .map((surftype: string) => (
                           <option key={surftype} value={surftype}>
                             {surftype}
                           </option>
@@ -939,5 +1005,6 @@ export default function Home() {
         </div>
       )}
     </div>
+    </ErrorBoundary>
   )
 }

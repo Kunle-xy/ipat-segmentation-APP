@@ -121,6 +121,15 @@ export default function ResultsTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filteredData])
 
+  // Check if search has no matches (must be before early returns)
+  const searchHasNoMatches = useMemo(() => {
+    if (!searchTerm.trim()) return false
+    return !filteredData.some(row => {
+      const routeName = (row.ROUTE_NAME || row.route_name || '').toString().toLowerCase()
+      return routeName.includes(searchTerm.toLowerCase())
+    })
+  }, [searchTerm, filteredData])
+
   // Early returns AFTER all hooks
   if (!data || !data.data || data.data.length === 0) {
     return (
@@ -212,16 +221,8 @@ export default function ResultsTable({
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+    URL.revokeObjectURL(url)
   }
-
-  // Check if search has no matches
-  const searchHasNoMatches = useMemo(() => {
-    if (!searchTerm.trim()) return false
-    return !filteredData.some(row => {
-      const routeName = (row.ROUTE_NAME || row.route_name || '').toString().toLowerCase()
-      return routeName.includes(searchTerm.toLowerCase())
-    })
-  }, [searchTerm, filteredData])
 
   return (
     <div className="h-full flex flex-col">
