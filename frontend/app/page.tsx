@@ -99,7 +99,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null)
   const [numSegments, setNumSegments] = useState(20)
   const [countyName, setCountyName] = useState('')
-  const [segmentationType, setSegmentationType] = useState<'fixed' | 'distance'>('fixed')
+  const [segmentationType, setSegmentationType] = useState<'fixed' | 'distance'>('distance')
   const [segmentDistance, setSegmentDistance] = useState(0.1)
 
   // New states for county dropdown and filters
