@@ -25,7 +25,7 @@ describe('Header Component', () => {
 
   it('displays the version number', () => {
     render(<Header />)
-    expect(screen.getByText(/Version 1.0.0/i)).toBeInTheDocument()
+    expect(screen.getByText(/Version 1.1.0/i)).toBeInTheDocument()
   })
 
   it('contains link to PROSPER website', () => {

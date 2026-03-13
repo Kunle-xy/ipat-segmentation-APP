@@ -31,6 +31,8 @@ export default function MapView({ selectedSegments }: MapViewProps) {
   const [zoomEnabled, setZoomEnabled] = useState(true)
   const [viewMode, setViewMode] = useState<'segmentation' | 'iri-range'>('segmentation')
   const [selectedYear, setSelectedYear] = useState<string | null>(null)
+  const [basemap, setBasemap] = useState<'default' | 'satellite' | 'topo'>('default')
+  const tileLayerRef = useRef<L.TileLayer | null>(null)
 
   // Utility function to get all available years from segments
   const getAvailableYears = (segments: MapSegment[]): string[] => {
@@ -52,11 +54,11 @@ export default function MapView({ selectedSegments }: MapViewProps) {
 
     if (iriForYear === undefined) return { color: '#9CA3AF', label: 'No Data' }
 
-    if (iriForYear < 60) return { color: '#3B82F6', label: 'Very Good' }
-    if (iriForYear < 95) return { color: '#10B981', label: 'Good' }
-    if (iriForYear < 170) return { color: '#EAB308', label: 'Fair' }
-    if (iriForYear < 220) return { color: '#F97316', label: 'Poor' }
-    return { color: '#EF4444', label: 'Very Poor' }
+    if (iriForYear < 60) return { color: '#00E5FF', label: 'Very Good' }
+    if (iriForYear < 95) return { color: '#76FF03', label: 'Good' }
+    if (iriForYear < 170) return { color: '#FFEA00', label: 'Fair' }
+    if (iriForYear < 220) return { color: '#FF6D00', label: 'Poor' }
+    return { color: '#FF1744', label: 'Very Poor' }
   }
 
   // Initialize map
@@ -76,13 +78,14 @@ export default function MapView({ selectedSegments }: MapViewProps) {
       maxZoom: 20
     }).setView([42.0, -93.5], 7)
 
-    // Add OpenStreetMap tile layer
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    // Add default tile layer
+    const defaultLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 20,
       minZoom: 1
     }).addTo(map)
 
+    tileLayerRef.current = defaultLayer
     mapRef.current = map
 
     return () => {
@@ -122,6 +125,40 @@ export default function MapView({ selectedSegments }: MapViewProps) {
     }
   }, [zoomEnabled])
 
+  // Switch basemap layer
+  useEffect(() => {
+    if (!mapRef.current) return
+
+    const tiles = {
+      default: {
+        url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      },
+      satellite: {
+        url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attribution: '&copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics',
+      },
+      topo: {
+        url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+        attribution: '&copy; <a href="https://opentopomap.org">OpenTopoMap</a> contributors',
+      },
+    }
+
+    if (tileLayerRef.current) {
+      mapRef.current.removeLayer(tileLayerRef.current)
+    }
+
+    const config = tiles[basemap]
+    tileLayerRef.current = L.tileLayer(config.url, {
+      attribution: config.attribution,
+      maxZoom: 20,
+      minZoom: 1,
+    }).addTo(mapRef.current)
+
+    // Keep segments on top
+    segmentLayersRef.current.forEach(layer => layer.bringToFront())
+  }, [basemap])
+
   // Update map when selected segments change
   useEffect(() => {
     if (!mapRef.current) return
@@ -153,7 +190,20 @@ export default function MapView({ selectedSegments }: MapViewProps) {
       let color: string
       if (viewMode === 'segmentation') {
         // Color code by index for visibility
-        const colors = ['#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6']
+        const colors = [
+          '#FF1744', // bright red
+          '#00E5FF', // cyan
+          '#FFEA00', // vivid yellow
+          '#D500F9', // electric purple
+          '#76FF03', // vivid lime
+          '#FF6D00', // vivid orange
+          '#00B0FF', // light blue
+          '#F50057', // hot pink
+          '#1DE9B6', // teal
+          '#FF9100', // amber
+          '#651FFF', // deep violet
+          '#64DD17', // light green
+        ]
         color = colors[index % colors.length]
       } else {
         // IRI Range View - color based on IRI value for selected year
@@ -188,6 +238,12 @@ export default function MapView({ selectedSegments }: MapViewProps) {
         }
       })
 
+      // Click to select segment - bold + white outline
+      polyline.on('click', () => {
+        setHoveredSegment(null)
+        setTimeout(() => setHoveredSegment(segment), 0)
+      })
+
       // Add popup with segment info and Show Plot button
       const iriForSelectedYear = viewMode === 'iri-range' && selectedYear
         ? segment.iriData?.find(data => data.year === selectedYear)?.iri
@@ -202,31 +258,61 @@ export default function MapView({ selectedSegments }: MapViewProps) {
           ${viewMode === 'iri-range' && selectedYear ? `
             <br/>IRI (${selectedYear}): ${iriForSelectedYear !== undefined && iriForSelectedYear !== null ? iriForSelectedYear.toFixed(1) : 'N/A'}
           ` : ''}
-          ${segment.iriData && segment.iriData.length > 0 ? `
-            <div style="margin-top: 8px;">
+          <div style="margin-top: 8px; display: flex; gap: 6px;">
+            ${segment.iriData && segment.iriData.length > 0 ? `
               <button
                 id="show-plot-${index}"
-                style="background-color: #3B82F6; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; width: 100%; font-weight: 500;"
+                style="background-color: #3B82F6; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; flex: 1; font-weight: 500; font-size: 12px;"
                 onmouseover="this.style.backgroundColor='#2563EB'"
                 onmouseout="this.style.backgroundColor='#3B82F6'"
               >
-                📊 Show IRI Plot
+                📊 IRI Plot
               </button>
-            </div>
-          ` : ''}
+            ` : ''}
+            <button
+              id="street-view-${index}"
+              style="background-color: #F59E0B; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; flex: 1; font-weight: 500; font-size: 12px;"
+              onmouseover="this.style.backgroundColor='#D97706'"
+              onmouseout="this.style.backgroundColor='#F59E0B'"
+            >
+              🛣️ Street View
+            </button>
+          </div>
         </div>
       `
 
       const popup = L.popup().setContent(popupContent)
       polyline.bindPopup(popup)
 
-      // Add click handler for the Show Plot button after popup opens
+      // Add click handlers after popup opens
       polyline.on('popupopen', () => {
-        const button = document.getElementById(`show-plot-${index}`)
-        if (button) {
-          button.addEventListener('click', () => {
-            setHoveredSegment(segment)
+        const plotBtn = document.getElementById(`show-plot-${index}`)
+        if (plotBtn) {
+          plotBtn.addEventListener('click', () => {
+            // Clear first to force re-trigger even if same segment
+            setHoveredSegment(null)
+            setTimeout(() => {
+              setHoveredSegment(segment)
+            }, 0)
             polyline.closePopup()
+          })
+        }
+
+        const svBtn = document.getElementById(`street-view-${index}`)
+        if (svBtn) {
+          svBtn.addEventListener('click', () => {
+            const lat = (segment.from_lat + segment.to_lat) / 2
+            const lon = (segment.from_lon + segment.to_lon) / 2
+            // Calculate heading from segment start to end
+            const dLon = (segment.to_lon - segment.from_lon) * Math.PI / 180
+            const y = Math.sin(dLon) * Math.cos(segment.to_lat * Math.PI / 180)
+            const x = Math.cos(segment.from_lat * Math.PI / 180) * Math.sin(segment.to_lat * Math.PI / 180) -
+                      Math.sin(segment.from_lat * Math.PI / 180) * Math.cos(segment.to_lat * Math.PI / 180) * Math.cos(dLon)
+            const heading = ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360
+            window.open(
+              `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lon}&heading=${Math.round(heading)}&pitch=0&fov=90`,
+              '_blank'
+            )
           })
         }
       })
@@ -242,6 +328,39 @@ export default function MapView({ selectedSegments }: MapViewProps) {
       mapRef.current.fitBounds(bounds, { padding: [50, 50] })
     }
   }, [selectedSegments, viewMode, selectedYear])
+
+  // Reapply bold styling after segment layers are rebuilt
+  useEffect(() => {
+    if (!hoveredSegment || !mapRef.current || segmentLayersRef.current.length === 0) return
+
+    // Remove existing white outline
+    if (whiteOutlineRef.current && mapRef.current.hasLayer(whiteOutlineRef.current)) {
+      mapRef.current.removeLayer(whiteOutlineRef.current)
+      whiteOutlineRef.current = null
+    }
+
+    segmentLayersRef.current.forEach(polyline => {
+      if (!polyline || !mapRef.current?.hasLayer(polyline)) return
+      const segmentData = (polyline as any)._segmentData as MapSegment | undefined
+      if (segmentData &&
+          segmentData.route_name === hoveredSegment.route_name &&
+          segmentData.segment_id === hoveredSegment.segment_id) {
+        const coords: L.LatLngExpression[] = [
+          [segmentData.from_lat, segmentData.from_lon],
+          [segmentData.to_lat, segmentData.to_lon]
+        ]
+        const whiteOutline = L.polyline(coords, {
+          color: '#FFFFFF',
+          weight: 16,
+          opacity: 1,
+        }).addTo(mapRef.current!)
+        polyline.bringToFront()
+        whiteOutlineRef.current = whiteOutline
+        polyline.setStyle({ weight: 12, opacity: 1 })
+      }
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSegments])
 
   // Update segment thickness when plot is shown/closed
   useEffect(() => {
@@ -364,6 +483,27 @@ export default function MapView({ selectedSegments }: MapViewProps) {
             )}
           </svg>
         </button>
+
+        {/* Basemap switcher - vertical */}
+        <div className="bg-white rounded shadow-lg overflow-hidden flex flex-col text-xs">
+          {([
+            ['default', 'Map'],
+            ['satellite', 'Sat'],
+            ['topo', 'Topo'],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setBasemap(key)}
+              className={`px-2.5 py-1.5 transition-colors border-b last:border-b-0 border-gray-200 ${
+                basemap === key
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Segment counter */}
@@ -399,23 +539,23 @@ export default function MapView({ selectedSegments }: MapViewProps) {
           {/* Legend items */}
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded" style={{ backgroundColor: '#3B82F6' }} />
+              <div className="w-4 h-4 rounded" style={{ backgroundColor: '#00E5FF' }} />
               <span className="text-xs text-gray-700">Very Good (&lt; 60)</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded" style={{ backgroundColor: '#10B981' }} />
+              <div className="w-4 h-4 rounded" style={{ backgroundColor: '#76FF03' }} />
               <span className="text-xs text-gray-700">Good (60-95)</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded" style={{ backgroundColor: '#EAB308' }} />
+              <div className="w-4 h-4 rounded" style={{ backgroundColor: '#FFEA00' }} />
               <span className="text-xs text-gray-700">Fair (95-170)</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded" style={{ backgroundColor: '#F97316' }} />
+              <div className="w-4 h-4 rounded" style={{ backgroundColor: '#FF6D00' }} />
               <span className="text-xs text-gray-700">Poor (170-220)</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded" style={{ backgroundColor: '#EF4444' }} />
+              <div className="w-4 h-4 rounded" style={{ backgroundColor: '#FF1744' }} />
               <span className="text-xs text-gray-700">Very Poor (≥ 220)</span>
             </div>
           </div>

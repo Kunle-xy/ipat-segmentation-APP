@@ -47,8 +47,10 @@ async def upload_files(files: List[UploadFile] = File(...), county_name: str = N
 
         for file in files:
             # Extract year from filename
-            filename = file.filename.replace('.xlsx', '').replace('.xls', '')
-            year = ''.join(filter(str.isdigit, filename))
+            filename_clean = file.filename
+            for ext in ['.xlsx', '.xls', '.csv']:
+                filename_clean = filename_clean.replace(ext, '').replace(ext.upper(), '')
+            year = ''.join(filter(str.isdigit, filename_clean))
             logger.info(f"Processing file: {file.filename}, extracted year: {year}")
 
             if not year:
@@ -57,19 +59,22 @@ async def upload_files(files: List[UploadFile] = File(...), county_name: str = N
                     detail=f"Could not extract year from filename: {file.filename}"
                 )
 
-            # Read Excel file directly from memory - OPTIMIZED
+            # Read file directly from memory
             contents = await file.read()
             logger.info(f"Read {len(contents)} bytes from {file.filename}")
 
             try:
-                # Read directly from BytesIO for faster processing
-                df = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
+                lower_name = file.filename.lower()
+                if lower_name.endswith('.csv'):
+                    df = pd.read_csv(io.BytesIO(contents))
+                else:
+                    df = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
                 logger.info(f"Loaded DataFrame with {len(df)} rows, {len(df.columns)} columns")
             except Exception as e1:
-                logger.error(f"Failed to read Excel file: {e1}")
+                logger.error(f"Failed to read file: {e1}")
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Could not read Excel file {file.filename}: {str(e1)}"
+                    detail=f"Could not read file {file.filename}: {str(e1)}"
                 )
 
             # Fix anomalies: swap FROM_MEASURE and TO_MEASURE if FROM > TO
@@ -95,11 +100,14 @@ async def upload_files(files: List[UploadFile] = File(...), county_name: str = N
                 "IRI", "COUNTY_ID", "SURFTYPE"
             ]
 
+            # Normalize column names (strip whitespace, uppercase)
+            df.columns = [col.strip().upper() for col in df.columns]
+
             missing_columns = [col for col in required_columns if col not in df.columns]
             if missing_columns:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Missing columns in {file.filename}: {missing_columns}"
+                    detail=f"Missing required columns in {file.filename}: {', '.join(missing_columns)}. Check the File Format Guide for required columns."
                 )
 
             # Clean and cast all columns properly

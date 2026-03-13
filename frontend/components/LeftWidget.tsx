@@ -1,6 +1,6 @@
 "use client";
 import React, { useState, useCallback, useEffect, useRef, memo } from "react";
-import { Upload, RefreshCw, CloudCog, ArrowDownUp, ChevronDown, ChevronUp, FolderOpen, Play, Edit2, X } from "lucide-react";
+import { Upload, RefreshCw, CloudCog, ArrowDownUp, ChevronDown, ChevronUp, FolderOpen, Play, Edit2, X, Table, EyeOff, Trash2 } from "lucide-react";
 import FileUpload from "./FileUpload";
 
 interface LeftWidgetProps {
@@ -33,6 +33,11 @@ interface LeftWidgetProps {
   loadingCounties: boolean;
   toggleYearSelection: (year: string) => void;
   processStatus: any;
+  showTable: boolean;
+  setShowTable: (show: boolean) => void;
+  setTableHeight: (height: number) => void;
+  hasResults: boolean;
+  handleDeleteCounty: (county: string) => Promise<void>;
 }
 
 function LeftWidget({
@@ -65,6 +70,11 @@ function LeftWidget({
   loadingCounties,
   toggleYearSelection,
   processStatus,
+  showTable,
+  setShowTable,
+  setTableHeight,
+  hasResults,
+  handleDeleteCounty,
 }: LeftWidgetProps) {
   const [open, setOpen] = useState(true);
   const [isResizing, setIsResizing] = useState(false);
@@ -72,6 +82,9 @@ function LeftWidget({
   const [resizeStartX, setResizeStartX] = useState(0);
   const [resizeStartWidth, setResizeStartWidth] = useState(320);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -129,15 +142,15 @@ function LeftWidget({
     <aside
       style={{
         width: open ? `${width}px` : '64px',
-        minWidth: open ? `${width}px` : '64px',
-        maxWidth: open ? `${width}px` : '64px',
+        minWidth: open ? '200px' : '64px',
+        maxWidth: open ? 'min(40vw, 500px)' : '64px',
         transition: isResizing ? 'none' : 'width 300ms ease-in-out'
       }}
       className={`
         relative h-full p-4 text-slate-100
         bg-gradient-to-b from-slate-900 to-slate-800
         ring-1 ring-inset ring-slate-700/50
-        flex flex-col flex-shrink-0 z-[100]
+        flex flex-col flex-shrink-0 z-[100] overflow-hidden
         ${isResizing ? 'select-none' : ''}
       `}
       aria-label="Controls widget"
@@ -160,18 +173,27 @@ function LeftWidget({
           <Upload className="h-5 w-5" />
         </div>
         <div
-          className={`transition-all duration-200 overflow-hidden ${
+          className={`transition-all duration-200 overflow-hidden flex-1 ${
             open ? "opacity-100 w-auto" : "opacity-0 w-0"
           }`}
         >
           <div className="text-sm font-semibold">Segmentation Analysis</div>
           <div className="text-xs text-slate-300">Upload Data and Segment Roadway</div>
         </div>
+        {open && (
+          <button
+            onClick={() => window.location.reload()}
+            title="Reload page"
+            className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-slate-700 transition-colors shrink-0"
+          >
+            <RefreshCw className="h-4 w-4 text-slate-300" />
+          </button>
+        )}
       </div>
 
       {/* === MAIN CONTENT === */}
       <div
-        className={`flex-1 space-y-4 transition-opacity duration-200 overflow-y-auto min-h-0 ${
+        className={`flex-1 space-y-4 transition-opacity duration-200 overflow-y-auto overflow-x-hidden min-h-0 min-w-0 ${
           open ? "opacity-100" : "opacity-0"
         }`}
       >
@@ -198,21 +220,108 @@ function LeftWidget({
             </button>
 
             {showCountyDropdown && availableCounties.length > 0 && (
-              <div className="absolute left-0 mt-2 w-full bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-10 max-h-60 overflow-y-auto">
-                <div className="p-2 border-b border-slate-600 bg-slate-700">
-                  <p className="text-xs font-semibold text-slate-300">Select County</p>
+              <div className="absolute left-0 mt-2 w-full bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-10 max-h-72 overflow-y-auto">
+                <div className="p-2 border-b border-slate-600 bg-slate-700 flex items-center justify-between">
+                  <p className="text-xs font-semibold text-slate-300">Saved Data ({availableCounties.length}/5)</p>
+                  {availableCounties.length >= 5 && (
+                    <span className="text-[10px] text-amber-400">Limit reached</span>
+                  )}
                 </div>
                 {availableCounties.map((county) => (
-                  <button
+                  <div
                     key={county}
-                    onClick={() => handleLoadCountyData(county)}
-                    className="w-full text-left px-3 py-2 hover:bg-blue-600/20 border-b border-slate-700 last:border-b-0 transition-colors"
+                    className="flex items-center justify-between px-3 py-2 border-b border-slate-700 last:border-b-0 hover:bg-slate-700/50 transition-colors group"
                   >
-                    <span className="text-sm text-slate-200 capitalize">
-                      {county.replace(/_/g, ' ')}
-                    </span>
-                  </button>
+                    <button
+                      onClick={() => handleLoadCountyData(county)}
+                      className="flex-1 text-left"
+                    >
+                      <span className="text-sm text-slate-200 capitalize">
+                        {county.replace(/_/g, ' ')}
+                      </span>
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDeleteTarget(county);
+                        setDeleteConfirmText('');
+                      }}
+                      className="p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-900/30 opacity-0 group-hover:opacity-100 transition-all"
+                      title={`Delete ${county} data`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 ))}
+              </div>
+            )}
+
+            {/* Delete Confirmation Modal */}
+            {deleteTarget && (
+              <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100000]">
+                <div className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl p-5 max-w-sm w-full mx-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-red-900/50">
+                      <Trash2 className="h-4 w-4 text-red-400" />
+                    </div>
+                    <h3 className="text-sm font-semibold text-slate-100">Delete County Data</h3>
+                  </div>
+
+                  <p className="text-xs text-slate-300 mb-1">
+                    This will permanently delete all segmentation data for
+                    <span className="font-semibold text-white capitalize"> {deleteTarget.replace(/_/g, ' ')}</span> from the cloud.
+                  </p>
+                  <p className="text-xs text-slate-400 mb-4">
+                    This action cannot be undone.
+                  </p>
+
+                  <label className="block text-xs text-slate-400 mb-1.5">
+                    Type <span className="font-mono text-red-400">I confirm</span> to proceed:
+                  </label>
+                  <input
+                    type="text"
+                    value={deleteConfirmText}
+                    onChange={(e) => setDeleteConfirmText(e.target.value)}
+                    placeholder="I confirm"
+                    className="w-full bg-slate-900 text-sm px-3 py-2 rounded border border-slate-600 focus:outline-none focus:border-red-500 text-slate-200 mb-4"
+                    autoFocus
+                  />
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        setDeleteTarget(null);
+                        setDeleteConfirmText('');
+                      }}
+                      className="flex-1 px-3 py-2 text-sm rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={async () => {
+                        setIsDeleting(true);
+                        await handleDeleteCounty(deleteTarget);
+                        setIsDeleting(false);
+                        setDeleteTarget(null);
+                        setDeleteConfirmText('');
+                      }}
+                      disabled={deleteConfirmText !== 'I confirm' || isDeleting}
+                      className="flex-1 px-3 py-2 text-sm rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium transition-colors disabled:bg-slate-600 disabled:text-slate-400 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                    >
+                      {isDeleting ? (
+                        <>
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                          <span>Deleting...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>Delete</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -459,6 +568,37 @@ function LeftWidget({
             </>
           )}
         </button>
+
+        {/* Show/Hide Table Button */}
+        {hasResults && (
+          <button
+            onClick={() => {
+              if (showTable) {
+                setShowTable(false);
+                setTableHeight(50);
+              } else {
+                setShowTable(true);
+              }
+            }}
+            className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors text-sm ${
+              showTable
+                ? 'bg-red-600 hover:bg-red-700 text-white'
+                : 'bg-green-600 hover:bg-green-700 text-white'
+            }`}
+          >
+            {showTable ? (
+              <>
+                <EyeOff className="h-4 w-4" />
+                <span>Hide Table</span>
+              </>
+            ) : (
+              <>
+                <Table className="h-4 w-4" />
+                <span>Show Table</span>
+              </>
+            )}
+          </button>
+        )}
       </div>
 
       {/* === TOGGLE BUTTON === */}

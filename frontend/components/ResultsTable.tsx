@@ -272,7 +272,7 @@ export default function ResultsTable({
           minHeight: '200px'
         }}
       >
-        <div style={{ width: '2000px', minWidth: '100%' }}>
+        <div style={{ minWidth: 'max-content' }}>
           <table className="w-full divide-y divide-gray-200">
             <thead className="sticky top-0 z-[5] shadow-sm">
             <tr>
@@ -304,7 +304,7 @@ export default function ResultsTable({
               {indexColumns.map(column => (
                 <th
                   key={column}
-                  className="px-2 py-2 text-left text-[10px] font-medium text-blue-600 uppercase tracking-tight whitespace-nowrap bg-blue-50"
+                  className="px-1.5 py-2 text-left text-[8px] font-medium text-blue-600 uppercase tracking-tight whitespace-nowrap bg-blue-50"
                   title="Row indices used for this segment"
                 >
                   {column.replace(/_/g, ' ')}
@@ -337,7 +337,7 @@ export default function ResultsTable({
                   >
                     {typeof row[column] === 'number'
                       ? column.includes('lat') || column.includes('lon')
-                        ? row[column].toFixed(8)
+                        ? row[column].toFixed(6)
                         : column === 'length_ft'
                         ? row[column].toFixed(2)
                         : row[column].toFixed(4)
@@ -352,15 +352,21 @@ export default function ResultsTable({
                     {row[column] ? row[column].toFixed(4) : 'N/A'}
                   </td>
                 ))}
-                {indexColumns.map(column => (
-                  <td
-                    key={column}
-                    className="px-2 py-1 text-[11px] text-blue-700 whitespace-nowrap bg-blue-50 font-mono"
-                    title={`Row indices: ${row[column] || 'N/A'}`}
-                  >
-                    {row[column] || 'N/A'}
-                  </td>
-                ))}
+                {indexColumns.map(column => {
+                  const val = row[column] || 'N/A'
+                  const display = typeof val === 'string' && val.length > 20
+                    ? val.slice(0, 20) + '...'
+                    : val
+                  return (
+                    <td
+                      key={column}
+                      className="px-1.5 py-1 text-[8px] text-blue-600 whitespace-nowrap bg-blue-50/50 font-mono"
+                      title={`Row indices: ${val}`}
+                    >
+                      {display}
+                    </td>
+                  )
+                })}
               </tr>
               )
             })}

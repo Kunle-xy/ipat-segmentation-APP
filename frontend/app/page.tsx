@@ -229,6 +229,13 @@ export default function Home() {
       return
     }
 
+    // Check max 10 datasets limit
+    const sanitizedCounty = countyName.toLowerCase().trim().replace(/[^a-z0-9_]/g, '_')
+    if (!availableCounties.includes(sanitizedCounty) && availableCounties.length >= 5) {
+      setError('Maximum of 5 datasets reached. Please delete an existing dataset before adding a new one.')
+      return
+    }
+
     setIsUploading(true)
     setError(null)
     setUploadProgress({ current: 0, total: files.length, currentFile: '' })
@@ -396,6 +403,29 @@ export default function Home() {
       setError(err.response?.data?.detail || 'Failed to fetch counties')
     } finally {
       setLoadingCounties(false)
+    }
+  }
+
+  // Delete a county dataset
+  const handleDeleteCounty = async (county: string) => {
+    try {
+      await axios.delete(`${API_URL}/clear`, {
+        params: { county_name: county }
+      })
+      // Refresh the counties list
+      setAvailableCounties(prev => prev.filter(c => c !== county))
+      // If we deleted the currently loaded county, clear state
+      if (countyName === county) {
+        setCountyName('')
+        setResults(null)
+        setCountyTables([])
+        setSelectedYears([])
+        setProcessedYears([])
+        setSegmentationMetadata(null)
+        setShowTable(false)
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to delete county data')
     }
   }
 
@@ -760,10 +790,15 @@ export default function Home() {
           loadingCounties={loadingCounties}
           toggleYearSelection={toggleYearSelection}
           processStatus={processStatus}
+          showTable={showTable}
+          setShowTable={setShowTable}
+          setTableHeight={setTableHeight}
+          hasResults={!!results}
+          handleDeleteCounty={handleDeleteCounty}
         />
 
         {/* Right Content Area (Map + Optional Table) */}
-        <div ref={containerRef} className="flex-1 flex flex-col relative z-10">
+        <div ref={containerRef} className="flex-1 flex flex-col relative z-10 min-w-0 overflow-hidden">
           {/* Success/Error Messages */}
           <div className="absolute top-4 left-4 right-4 z-10 space-y-2">
             {error && (
@@ -793,36 +828,6 @@ export default function Home() {
               </div>
             )}
           </div>
-
-          {/* Table Toggle Button */}
-          {results && !showTable && (
-            <button
-              onClick={() => setShowTable(true)}
-              className="absolute top-2 right-2 z-[1001] flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg shadow-lg border border-green-700 transition-colors font-medium"
-              title="Show table"
-            >
-              <Table className="h-5 w-5" />
-              <span className="text-sm font-medium">Show Table</span>
-            </button>
-          )}
-
-          {/* Hide Table Button - positioned above map */}
-          {showTable && results && (
-            <button
-              onClick={() => {
-                setShowTable(false)
-                setTableHeight(50) // Reset to default height
-              }}
-              style={{ pointerEvents: 'auto' }}
-              className="fixed top-20 right-4 z-[99999] flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2.5 rounded-lg shadow-2xl border-2 border-red-800 transition-all hover:scale-105 font-semibold"
-              title="Hide table and expand map to full view"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-              <span className="text-sm">Hide Table</span>
-            </button>
-          )}
 
           {/* Map View */}
           <div
@@ -856,7 +861,7 @@ export default function Home() {
                   height: `${tableHeight}%`,
                   transition: isResizingTable ? 'none' : 'height 300ms ease-in-out'
                 }}
-                className="bg-white relative w-full"
+                className="bg-white relative w-full min-w-0 overflow-hidden"
               >
                 {/* Scrollable Table Content */}
                 <div className="h-full flex flex-col p-2">
@@ -894,7 +899,7 @@ export default function Home() {
                     </div>
 
                     {/* Search Input - Compact */}
-                    <div className="relative w-48">
+                    <div className="relative w-32 min-w-[8rem] max-w-[12rem] flex-shrink">
                       <div className="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none">
                         <svg className="h-3 w-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -922,12 +927,11 @@ export default function Home() {
 
                     {/* Segmentation Metadata - Method Only (from database) */}
                     {segmentationMetadata && (
-                      <div className="flex items-center gap-2 text-xs bg-blue-50 border border-blue-200 px-3 py-1 rounded shrink-0">
-                        <span className="font-semibold text-blue-900">Segmentation Method:</span>
-                        <span className="text-blue-700 font-semibold">
+                      <div className="flex items-center gap-1 text-xs bg-blue-50 border border-blue-200 px-2 py-1 rounded min-w-0">
+                        <span className="text-blue-700 font-semibold truncate">
                           {segmentationMetadata.segmentation_type === 'fixed'
-                            ? `Fixed (${Math.round(segmentationMetadata.segmentation_value)} segments per route)`
-                            : `Distance-Based (${segmentationMetadata.segmentation_value} mile${segmentationMetadata.segmentation_value !== 1 ? 's' : ''} per segment)`}
+                            ? `Fixed (${Math.round(segmentationMetadata.segmentation_value)} seg/route)`
+                            : `Dist (${segmentationMetadata.segmentation_value} mi/seg)`}
                         </span>
                       </div>
                     )}
