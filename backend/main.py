@@ -11,10 +11,11 @@ from routes.counties import router as counties_router
 app = FastAPI(title="IPAT Segmentation Analysis API")
 
 # CORS middleware - allow Cloud Run and localhost
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3010").split(",")
+# Support both CORS_ORIGINS (docker-compose) and ALLOWED_ORIGINS (legacy)
+ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", os.getenv("ALLOWED_ORIGINS", "http://localhost:3010")).split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=[o.strip() for o in ALLOWED_ORIGINS],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

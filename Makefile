@@ -32,6 +32,15 @@ help:
 	@echo "  make prod-down    - Stop production services"
 	@echo "  make prod-logs    - View production logs"
 	@echo ""
+	@echo "$(GREEN)Cloud Run Commands:$(NC)"
+	@echo "  make deploy       - Full deploy (setup + build + deploy)"
+	@echo "  make deploy-setup - One-time GCP setup"
+	@echo "  make deploy-build - Build & push Docker images"
+	@echo "  make deploy-backend  - Deploy backend to Cloud Run"
+	@echo "  make deploy-frontend - Deploy frontend to Cloud Run"
+	@echo "  make deploy-status   - Show Cloud Run status"
+	@echo "  make deploy-teardown - Delete Cloud Run services"
+	@echo ""
 	@echo "$(GREEN)Utility Commands:$(NC)"
 	@echo "  make status       - Show service status"
 	@echo "  make shell-backend- Shell into backend container"
@@ -235,3 +244,123 @@ format:
 	@echo "$(BLUE)Formatting code...$(NC)"
 	cd backend && pip install -q black && black .
 	@echo "$(GREEN)✓ Code formatted!$(NC)"
+
+# ================================
+# Cloud Run Deployment Commands
+# ================================
+
+# Configuration
+GCP_PROJECT ?= vernal-citadel-479904-i2
+GCP_REGION ?= us-central1
+AR_REPO ?= $(GCP_REGION)-docker.pkg.dev/$(GCP_PROJECT)/ipat
+
+## deploy-setup: One-time setup for Cloud Run deployment
+deploy-setup:
+	@echo "$(BLUE)Setting up Cloud Run deployment...$(NC)"
+	gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com --project=$(GCP_PROJECT)
+	gcloud artifacts repositories create ipat --repository-format=docker --location=$(GCP_REGION) --project=$(GCP_PROJECT) 2>/dev/null || echo "$(YELLOW)Repository already exists$(NC)"
+	gcloud auth configure-docker $(GCP_REGION)-docker.pkg.dev --quiet
+	@echo "$(GREEN)✓ Setup complete!$(NC)"
+
+## deploy-build: Build and push Docker images to Artifact Registry
+deploy-build:
+	@echo "$(BLUE)Building and pushing images...$(NC)"
+	@echo "Building backend..."
+	docker build -t $(AR_REPO)/ipat-backend:latest --target production ./backend
+	docker push $(AR_REPO)/ipat-backend:latest
+	@echo "Building frontend..."
+	docker build -t $(AR_REPO)/ipat-frontend:latest --target production \
+		--build-arg NEXT_PUBLIC_API_URL=$$(gcloud run services describe ipat-backend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)' 2>/dev/null || echo "https://ipat-backend-placeholder.run.app") \
+		./frontend
+	docker push $(AR_REPO)/ipat-frontend:latest
+	@echo "$(GREEN)✓ Images built and pushed!$(NC)"
+
+## deploy-backend: Deploy backend to Cloud Run
+deploy-backend:
+	@echo "$(BLUE)Deploying backend to Cloud Run...$(NC)"
+	gcloud run deploy ipat-backend \
+		--image=$(AR_REPO)/ipat-backend:latest \
+		--region=$(GCP_REGION) \
+		--project=$(GCP_PROJECT) \
+		--platform=managed \
+		--port=8010 \
+		--memory=2Gi \
+		--cpu=2 \
+		--timeout=300 \
+		--max-instances=10 \
+		--min-instances=0 \
+		--allow-unauthenticated \
+		--set-env-vars="GCP_PROJECT_ID=$(GCP_PROJECT),GCP_DATASET_ID=ipat_dataset,LOG_LEVEL=WARNING" \
+		--service-account=$(shell gcloud iam service-accounts list --project=$(GCP_PROJECT) --filter="email~ipat" --format="value(email)" 2>/dev/null || echo "default")
+	@echo "$(GREEN)✓ Backend deployed!$(NC)"
+	@echo "$(BLUE)Backend URL:$(NC)"
+	@gcloud run services describe ipat-backend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)'
+
+## deploy-frontend: Deploy frontend to Cloud Run (run after backend)
+deploy-frontend:
+	@echo "$(BLUE)Deploying frontend to Cloud Run...$(NC)"
+	$(eval BACKEND_URL := $(shell gcloud run services describe ipat-backend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)'))
+	@echo "Backend URL: $(BACKEND_URL)"
+	@echo "Rebuilding frontend with backend URL..."
+	docker build -t $(AR_REPO)/ipat-frontend:latest --target production \
+		--build-arg NEXT_PUBLIC_API_URL=$(BACKEND_URL) \
+		./frontend
+	docker push $(AR_REPO)/ipat-frontend:latest
+	gcloud run deploy ipat-frontend \
+		--image=$(AR_REPO)/ipat-frontend:latest \
+		--region=$(GCP_REGION) \
+		--project=$(GCP_PROJECT) \
+		--platform=managed \
+		--port=3010 \
+		--memory=1Gi \
+		--cpu=1 \
+		--timeout=60 \
+		--max-instances=5 \
+		--min-instances=0 \
+		--allow-unauthenticated \
+		--set-env-vars="NODE_ENV=production"
+	@echo "$(GREEN)✓ Frontend deployed!$(NC)"
+	@echo "$(BLUE)Frontend URL:$(NC)"
+	@gcloud run services describe ipat-frontend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)'
+
+## deploy: Full deployment (build + deploy backend + frontend)
+deploy: deploy-setup deploy-build deploy-backend deploy-frontend
+	@echo ""
+	@echo "$(GREEN)================================$(NC)"
+	@echo "$(GREEN)Cloud Run Deployment Complete!$(NC)"
+	@echo "$(GREEN)================================$(NC)"
+	@echo "$(BLUE)Backend: $(NC)$$(gcloud run services describe ipat-backend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)')"
+	@echo "$(BLUE)Frontend:$(NC)$$(gcloud run services describe ipat-frontend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)')"
+	@echo "$(GREEN)================================$(NC)"
+
+## deploy-update-cors: Update backend CORS to allow the frontend URL
+deploy-update-cors:
+	$(eval FRONTEND_URL := $(shell gcloud run services describe ipat-frontend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)'))
+	@echo "$(BLUE)Updating backend CORS for $(FRONTEND_URL)...$(NC)"
+	gcloud run services update ipat-backend \
+		--region=$(GCP_REGION) \
+		--project=$(GCP_PROJECT) \
+		--update-env-vars="CORS_ORIGINS=$(FRONTEND_URL)"
+	@echo "$(GREEN)✓ CORS updated!$(NC)"
+
+## deploy-status: Show Cloud Run deployment status
+deploy-status:
+	@echo "$(BLUE)Cloud Run Services:$(NC)"
+	@echo ""
+	@echo "$(GREEN)Backend:$(NC)"
+	@gcloud run services describe ipat-backend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='table(status.url, status.conditions[0].status)' 2>/dev/null || echo "  Not deployed"
+	@echo ""
+	@echo "$(GREEN)Frontend:$(NC)"
+	@gcloud run services describe ipat-frontend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='table(status.url, status.conditions[0].status)' 2>/dev/null || echo "  Not deployed"
+
+## deploy-teardown: Delete Cloud Run services
+deploy-teardown:
+	@echo "$(YELLOW)This will delete Cloud Run services!$(NC)"
+	@read -p "Are you sure? [y/N]: " confirm; \
+	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
+		gcloud run services delete ipat-backend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --quiet 2>/dev/null || true; \
+		gcloud run services delete ipat-frontend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --quiet 2>/dev/null || true; \
+		echo "$(GREEN)✓ Services deleted$(NC)"; \
+	else \
+		echo "$(YELLOW)Cancelled$(NC)"; \
+	fi

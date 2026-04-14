@@ -5,7 +5,13 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "GCP Region"
+  description = "GCP Region for Cloud Run and Artifact Registry"
+  type        = string
+  default     = "us-central1"
+}
+
+variable "bigquery_location" {
+  description = "BigQuery dataset location (can be multi-region like US)"
   type        = string
   default     = "US"
 }
@@ -47,13 +53,19 @@ variable "create_backup_bucket" {
 }
 
 variable "deploy_cloud_run" {
-  description = "Whether to deploy the backend to Cloud Run"
+  description = "Whether to deploy to Cloud Run"
   type        = bool
   default     = false
 }
 
 variable "backend_image" {
-  description = "Docker image for the backend (if deploying to Cloud Run)"
+  description = "Docker image for the backend"
   type        = string
-  default     = "gcr.io/vernal-citadel-479904-i2/ipat-backend:latest"
+  default     = "us-central1-docker.pkg.dev/vernal-citadel-479904-i2/ipat/ipat-backend:latest"
+}
+
+variable "frontend_image" {
+  description = "Docker image for the frontend"
+  type        = string
+  default     = "us-central1-docker.pkg.dev/vernal-citadel-479904-i2/ipat/ipat-frontend:latest"
 }

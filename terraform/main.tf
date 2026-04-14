@@ -10,17 +10,35 @@ terraform {
 }
 
 provider "google" {
-  project = var.project_id
-  region  = var.region
+  project     = var.project_id
+  region      = var.region
   credentials = file(var.credentials_file)
 }
 
+# ====================================
+# Artifact Registry (replaces deprecated gcr.io)
+# ====================================
+resource "google_artifact_registry_repository" "ipat_repo" {
+  count         = var.deploy_cloud_run ? 1 : 0
+  location      = var.region
+  repository_id = "ipat"
+  description   = "Docker images for IPAT application"
+  format        = "DOCKER"
+
+  labels = {
+    environment = var.environment
+    project     = "ipat-analysis"
+  }
+}
+
+# ====================================
 # BigQuery Dataset
+# ====================================
 resource "google_bigquery_dataset" "ipat_dataset" {
-  dataset_id                 = var.dataset_id
-  friendly_name              = "IPAT Distress Analysis Dataset"
-  description                = "Dataset for storing IPAT pavement distress data and analysis results"
-  location                   = var.region
+  dataset_id                  = var.dataset_id
+  friendly_name               = "IPAT Distress Analysis Dataset"
+  description                 = "Dataset for storing IPAT pavement distress data and analysis results"
+  location                    = var.bigquery_location
   default_table_expiration_ms = null
 
   labels = {
@@ -49,7 +67,9 @@ resource "google_bigquery_dataset" "ipat_dataset" {
   }
 }
 
-# Service Account (if not using existing one)
+# ====================================
+# Service Account (optional)
+# ====================================
 resource "google_service_account" "ipat_service_account" {
   count        = var.create_service_account ? 1 : 0
   account_id   = "ipat-analysis-sa"
@@ -57,7 +77,6 @@ resource "google_service_account" "ipat_service_account" {
   description  = "Service account for IPAT pavement distress analysis application"
 }
 
-# IAM Policy for Service Account
 resource "google_project_iam_member" "bigquery_admin" {
   count   = var.create_service_account ? 1 : 0
   project = var.project_id
@@ -79,11 +98,13 @@ resource "google_project_iam_member" "bigquery_job_user" {
   member  = "serviceAccount:${google_service_account.ipat_service_account[0].email}"
 }
 
-# Cloud Storage bucket for data backups (optional)
+# ====================================
+# Cloud Storage (optional backup bucket)
+# ====================================
 resource "google_storage_bucket" "ipat_backup" {
   count         = var.create_backup_bucket ? 1 : 0
   name          = "${var.project_id}-ipat-backup"
-  location      = var.region
+  location      = var.bigquery_location
   force_destroy = false
 
   uniform_bucket_level_access = true
@@ -107,7 +128,6 @@ resource "google_storage_bucket" "ipat_backup" {
   }
 }
 
-# IAM binding for bucket (if created)
 resource "google_storage_bucket_iam_member" "backup_admin" {
   count  = var.create_backup_bucket && var.create_service_account ? 1 : 0
   bucket = google_storage_bucket.ipat_backup[0].name
@@ -115,7 +135,9 @@ resource "google_storage_bucket_iam_member" "backup_admin" {
   member = "serviceAccount:${google_service_account.ipat_service_account[0].email}"
 }
 
-# Cloud Run service (optional - for deploying the backend)
+# ====================================
+# Cloud Run - Backend
+# ====================================
 resource "google_cloud_run_service" "ipat_backend" {
   count    = var.deploy_cloud_run ? 1 : 0
   name     = "ipat-backend"
@@ -125,6 +147,10 @@ resource "google_cloud_run_service" "ipat_backend" {
     spec {
       containers {
         image = var.backend_image
+
+        ports {
+          container_port = 8010
+        }
 
         env {
           name  = "GCP_PROJECT_ID"
@@ -136,20 +162,78 @@ resource "google_cloud_run_service" "ipat_backend" {
           value = var.dataset_id
         }
 
+        env {
+          name  = "CORS_ORIGINS"
+          value = var.deploy_cloud_run ? google_cloud_run_service.ipat_frontend[0].status[0].url : "*"
+        }
+
         resources {
           limits = {
-            cpu    = "1000m"
-            memory = "512Mi"
+            cpu    = "2000m"
+            memory = "2Gi"
           }
         }
       }
 
-      service_account_name = var.create_service_account ? google_service_account.ipat_service_account[0].email : var.service_account_email
+      container_concurrency = 80
+      timeout_seconds       = 300
+      service_account_name  = var.create_service_account ? google_service_account.ipat_service_account[0].email : var.service_account_email
     }
 
     metadata {
       annotations = {
         "autoscaling.knative.dev/maxScale" = "10"
+        "autoscaling.knative.dev/minScale" = "0"
+      }
+    }
+  }
+
+  traffic {
+    percent         = 100
+    latest_revision = true
+  }
+
+  depends_on = [google_cloud_run_service.ipat_frontend]
+}
+
+# ====================================
+# Cloud Run - Frontend
+# ====================================
+resource "google_cloud_run_service" "ipat_frontend" {
+  count    = var.deploy_cloud_run ? 1 : 0
+  name     = "ipat-frontend"
+  location = var.region
+
+  template {
+    spec {
+      containers {
+        image = var.frontend_image
+
+        ports {
+          container_port = 3010
+        }
+
+        env {
+          name  = "NODE_ENV"
+          value = "production"
+        }
+
+        resources {
+          limits = {
+            cpu    = "1000m"
+            memory = "1Gi"
+          }
+        }
+      }
+
+      container_concurrency = 80
+      timeout_seconds       = 60
+    }
+
+    metadata {
+      annotations = {
+        "autoscaling.knative.dev/maxScale" = "5"
+        "autoscaling.knative.dev/minScale" = "0"
       }
     }
   }
@@ -160,11 +244,21 @@ resource "google_cloud_run_service" "ipat_backend" {
   }
 }
 
-# Make Cloud Run service publicly accessible (if deployed)
-resource "google_cloud_run_service_iam_member" "public_access" {
+# ====================================
+# IAM - Public access for Cloud Run
+# ====================================
+resource "google_cloud_run_service_iam_member" "backend_public" {
   count    = var.deploy_cloud_run ? 1 : 0
   service  = google_cloud_run_service.ipat_backend[0].name
   location = google_cloud_run_service.ipat_backend[0].location
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+resource "google_cloud_run_service_iam_member" "frontend_public" {
+  count    = var.deploy_cloud_run ? 1 : 0
+  service  = google_cloud_run_service.ipat_frontend[0].name
+  location = google_cloud_run_service.ipat_frontend[0].location
   role     = "roles/run.invoker"
   member   = "allUsers"
 }

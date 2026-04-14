@@ -103,6 +103,13 @@ async def upload_files(files: List[UploadFile] = File(...), county_name: str = N
             # Normalize column names (strip whitespace, uppercase)
             df.columns = [col.strip().upper() for col in df.columns]
 
+            # Compute IRI from LIRI/RIRI if IRI column is missing
+            if "IRI" not in df.columns and "LIRI" in df.columns and "RIRI" in df.columns:
+                df["LIRI"] = pd.to_numeric(df["LIRI"], errors="coerce")
+                df["RIRI"] = pd.to_numeric(df["RIRI"], errors="coerce")
+                df["IRI"] = df[["LIRI", "RIRI"]].mean(axis=1)
+                logger.info(f"Computed IRI from LIRI/RIRI for {file.filename}")
+
             missing_columns = [col for col in required_columns if col not in df.columns]
             if missing_columns:
                 raise HTTPException(
@@ -112,6 +119,14 @@ async def upload_files(files: List[UploadFile] = File(...), county_name: str = N
 
             # Clean and cast all columns properly
             df = clean_and_cast_columns(df, file.filename)
+
+            # Fill NULL IRI values from LIRI/RIRI where available
+            if "LIRI" in df.columns and "RIRI" in df.columns:
+                iri_null = df["IRI"].isna()
+                if iri_null.any():
+                    df.loc[iri_null, "IRI"] = df.loc[iri_null, ["LIRI", "RIRI"]].mean(axis=1)
+                    filled = iri_null.sum() - df["IRI"].isna().sum()
+                    logger.info(f"Filled {filled} NULL IRI values from LIRI/RIRI in {file.filename}")
 
             # Only drop rows with null ROUTE_NAME (keep rows with null IRI, etc.)
             # AVG() will automatically ignore NULL values when calculating averages

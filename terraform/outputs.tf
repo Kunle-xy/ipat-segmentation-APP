@@ -23,9 +23,19 @@ output "backup_bucket_name" {
   value       = var.create_backup_bucket ? google_storage_bucket.ipat_backup[0].name : null
 }
 
-output "cloud_run_url" {
-  description = "Cloud Run Service URL"
+output "artifact_registry_url" {
+  description = "Artifact Registry repository URL"
+  value       = var.deploy_cloud_run ? "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.ipat_repo[0].repository_id}" : null
+}
+
+output "backend_url" {
+  description = "Cloud Run Backend URL"
   value       = var.deploy_cloud_run ? google_cloud_run_service.ipat_backend[0].status[0].url : null
+}
+
+output "frontend_url" {
+  description = "Cloud Run Frontend URL"
+  value       = var.deploy_cloud_run ? google_cloud_run_service.ipat_frontend[0].status[0].url : null
 }
 
 output "project_id" {

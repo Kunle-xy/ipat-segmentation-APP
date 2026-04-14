@@ -277,10 +277,10 @@ def _build_combined_query(county_dataset, years, segment_definitions_cte, comple
     FROM segment_consistency
     WHERE {' AND '.join(null_checks)}
       AND from_measure < to_measure
-      AND (from_lat_stddev IS NULL OR from_lat_stddev < 0.0001)
-      AND (from_lon_stddev IS NULL OR from_lon_stddev < 0.0001)
-      AND (to_lat_stddev IS NULL OR to_lat_stddev < 0.0001)
-      AND (to_lon_stddev IS NULL OR to_lon_stddev < 0.0001)
+      AND (from_lat_stddev IS NULL OR from_lat_stddev < 0.001)
+      AND (from_lon_stddev IS NULL OR from_lon_stddev < 0.001)
+      AND (to_lat_stddev IS NULL OR to_lat_stddev < 0.001)
+      AND (to_lon_stddev IS NULL OR to_lon_stddev < 0.001)
       AND (from_measure_stddev IS NULL OR from_measure_stddev < 0.01)
       AND (to_measure_stddev IS NULL OR to_measure_stddev < 0.01)
       AND years_count = {len(years)}

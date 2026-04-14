@@ -11,7 +11,7 @@ def clean_and_cast_columns(df, filename=""):
     numeric_columns = {
         'FROM_MEASURE', 'TO_MEASURE',
         'BEGIN_GLAT', 'BEGIN_GLON', 'END_GLAT', 'END_GLON',
-        'IRI', 'COUNTY_ID'
+        'IRI', 'LIRI', 'RIRI', 'COUNTY_ID'
     }
 
     # Get columns that exist in this dataframe

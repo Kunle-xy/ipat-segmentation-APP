@@ -1,9 +1,10 @@
 project_id            = "vernal-citadel-479904-i2"
-region                = "US"
+region                = "us-central1"
+bigquery_location     = "US"
 dataset_id            = "ipat_dataset"
 environment           = "dev"
 credentials_file      = "../backend/gcp-service-account.json"
-service_account_email = "zoomcamp-service@vernal-citadel-479904-i2.iam.gserviceaccount.com"
+service_account_email = "ipat-segmentation@vernal-citadel-479904-i2.iam.gserviceaccount.com"
 
 # Set to true if you want to create a new service account
 create_service_account = false
@@ -11,8 +12,9 @@ create_service_account = false
 # Set to true if you want to create a backup bucket
 create_backup_bucket = false
 
-# Set to true if you want to deploy to Cloud Run
+# Set to true to deploy both frontend and backend to Cloud Run
 deploy_cloud_run = false
 
-# If deploying to Cloud Run, specify the image
-# backend_image = "gcr.io/vernal-citadel-479904-i2/ipat-backend:latest"
+# Docker images (used when deploy_cloud_run = true)
+# backend_image  = "us-central1-docker.pkg.dev/vernal-citadel-479904-i2/ipat/ipat-backend:latest"
+# frontend_image = "us-central1-docker.pkg.dev/vernal-citadel-479904-i2/ipat/ipat-frontend:latest"
