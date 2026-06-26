@@ -8,110 +8,110 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _route_key_expr(has_route_id):
+    """SQL expression for the unique route key.
+
+    ROUTE_ID is the unique feature when present (alphanumeric codes such as
+    'M141541470N'), stored as STRING and used directly so it joins consistently
+    across year tables. Falls back to ROUTE_NAME only when no ROUTE_ID column
+    exists in the data.
+    """
+    if has_route_id:
+        return "ROUTE_ID"
+    return "ROUTE_NAME"
+
+
+def _build_union(tables, county_dataset, table_cols, has_route_id, has_liri, has_riri):
+    """Build the UNION ALL body that stacks all raw_distress_{year} tables.
+
+    Carries ROUTE_ID (as route_key), ROUTE_NAME, measures, coordinates, and
+    IRI/LIRI/RIRI through. LIRI/RIRI are emitted as NULL for any year table
+    that lacks them so the UNION stays type-consistent.
+    """
+    route_key_expr = _route_key_expr(has_route_id)
+    union_parts = []
+    for table in tables:
+        year = re.sub(r'[^0-9]', '', table.replace('raw_distress_', ''))
+        cols = table_cols.get(table, set())
+        liri_expr = "LIRI" if (has_liri and "LIRI" in cols) else "CAST(NULL AS FLOAT64)"
+        riri_expr = "RIRI" if (has_riri and "RIRI" in cols) else "CAST(NULL AS FLOAT64)"
+        union_parts.append(f"""
+            SELECT {route_key_expr} AS route_key,
+                   ROUTE_NAME,
+                   FROM_MEASURE, TO_MEASURE,
+                   BEGIN_GLAT, BEGIN_GLON, END_GLAT, END_GLON,
+                   IRI, {liri_expr} AS LIRI, {riri_expr} AS RIRI,
+                   COUNTY_ID, SURFTYPE,
+                   {year} AS data_year
+            FROM `{PROJECT_ID}.{county_dataset}.{table}`
+            WHERE {route_key_expr} IS NOT NULL
+              AND ROUTE_NAME IS NOT NULL
+              AND FROM_MEASURE IS NOT NULL
+              AND TO_MEASURE IS NOT NULL
+              AND BEGIN_GLAT IS NOT NULL
+              AND BEGIN_GLON IS NOT NULL
+              AND END_GLAT IS NOT NULL
+              AND END_GLON IS NOT NULL
+        """)
+    return ' UNION ALL '.join(union_parts)
+
+
 def _build_fixed_segment_cte(num_segments):
-    """Build segment_definitions CTE for fixed-count segmentation."""
+    """segment_definitions for fixed-count segmentation: N equal divisions of
+    the overlap window [route_min, route_max]."""
     return f"""
         segment_definitions AS (
-            SELECT rb.ROUTE_NAME,
+            SELECT rb.route_key,
                    segment_id,
                    rb.route_min + ((segment_id - 1) * (rb.route_max - rb.route_min) / {num_segments}) AS segment_start,
                    rb.route_min + (segment_id * (rb.route_max - rb.route_min) / {num_segments}) AS segment_end
             FROM route_bounds rb
             CROSS JOIN UNNEST(GENERATE_ARRAY(1, {num_segments})) AS segment_id
-            WHERE rb.ROUTE_NAME IN (SELECT ROUTE_NAME FROM valid_routes_with_overlap)
+            WHERE rb.route_key IN (SELECT route_key FROM valid_routes_with_overlap)
         )"""
 
 
 def _build_distance_segment_cte(segment_distance):
-    """Build segment_definitions CTE for distance-based segmentation."""
+    """segment_definitions for distance-based segmentation.
+
+    Mirrors the prototype's `while start < earlyFinish: end = start + segment`
+    loop: uniform `segment_distance`-mile windows walking from route_min, with
+    CEIL(...) segments so the final window covers the tail (uncapped end, like
+    the prototype's last iteration).
+    """
     return f"""
         route_segment_counts AS (
-            SELECT ROUTE_NAME,
-                   route_min,
-                   route_max,
-                   (route_max - route_min) AS route_length,
-                   CAST(FLOOR((route_max - route_min) / {segment_distance}) AS INT64) AS num_full_segments,
-                   CASE WHEN (route_max - route_min) - FLOOR((route_max - route_min) / {segment_distance}) * {segment_distance} > 0.001
-                        THEN 1 ELSE 0 END AS has_remainder
+            SELECT route_key, route_min, route_max,
+                   GREATEST(CAST(CEIL((route_max - route_min) / {segment_distance}) AS INT64), 1) AS num_segments
             FROM route_bounds
-            WHERE ROUTE_NAME IN (SELECT ROUTE_NAME FROM valid_routes_with_overlap)
+            WHERE route_key IN (SELECT route_key FROM valid_routes_with_overlap)
         ),
         segment_definitions AS (
-            SELECT rsc.ROUTE_NAME,
+            SELECT rsc.route_key,
                    segment_id,
                    rsc.route_min + ((segment_id - 1) * {segment_distance}) AS segment_start,
-                   CASE
-                     WHEN segment_id > rsc.num_full_segments THEN rsc.route_max
-                     ELSE rsc.route_min + (segment_id * {segment_distance})
-                   END AS segment_end
+                   rsc.route_min + (segment_id * {segment_distance}) AS segment_end
             FROM route_segment_counts rsc
-            CROSS JOIN UNNEST(GENERATE_ARRAY(1, rsc.num_full_segments + rsc.has_remainder)) AS segment_id
+            CROSS JOIN UNNEST(GENERATE_ARRAY(1, rsc.num_segments)) AS segment_id
         )"""
 
 
-def _build_complete_filter_fixed(num_segments, num_years):
-    """Build CTE to filter to complete segments for fixed segmentation."""
-    return f"""
-        segments_in_all_years AS (
-            SELECT ROUTE_NAME, segment_id
-            FROM segmented_data
-            GROUP BY ROUTE_NAME, segment_id
-            HAVING COUNT(DISTINCT data_year) = {num_years}
-               AND MIN(record_count) > 0
-        ),
-        routes_with_all_segments AS (
-            SELECT ROUTE_NAME
-            FROM segments_in_all_years
-            GROUP BY ROUTE_NAME
-            HAVING COUNT(DISTINCT segment_id) = {num_segments}
-        ),
-        complete_data AS (
-            SELECT s.*
-            FROM segmented_data s
-            INNER JOIN segments_in_all_years sia
-                ON s.ROUTE_NAME = sia.ROUTE_NAME AND s.segment_id = sia.segment_id
-            WHERE s.ROUTE_NAME IN (SELECT ROUTE_NAME FROM routes_with_all_segments)
-        )"""
+def _build_combined_query(county_dataset, years, segment_definitions_cte,
+                          segmentation_type, metadata_value, years_list,
+                          num_years, has_route_id, has_liri, has_riri):
+    """Build the segmentation pipeline that produces distress_final.
 
+    Logic mirrors the pandas prototype:
+      - overlap window per route (max of year-mins .. min of year-maxes)
+      - each record claimed by its EARLIEST overlapping segment (greedy `used`)
+      - begin coords from the record with the smallest FROM_MEASURE across all
+        years in the segment; end coords from the largest TO_MEASURE
+      - length from actual record coverage (max TO - min FROM)
+      - IRI/LIRI/RIRI averaged per year
+    """
 
-def _build_complete_filter_distance(num_years):
-    """Build CTE to filter to complete segments for distance-based segmentation."""
-    return f"""
-        segments_in_all_years AS (
-            SELECT ROUTE_NAME, segment_id
-            FROM segmented_data
-            GROUP BY ROUTE_NAME, segment_id
-            HAVING COUNT(DISTINCT data_year) = {num_years}
-               AND MIN(record_count) > 0
-        ),
-        route_expected_segments AS (
-            SELECT ROUTE_NAME, MAX(segment_id) AS expected_segments
-            FROM segmented_data
-            GROUP BY ROUTE_NAME
-        ),
-        routes_with_all_segments AS (
-            SELECT sia.ROUTE_NAME
-            FROM segments_in_all_years sia
-            INNER JOIN route_expected_segments res
-                ON sia.ROUTE_NAME = res.ROUTE_NAME
-            GROUP BY sia.ROUTE_NAME, res.expected_segments
-            HAVING COUNT(DISTINCT sia.segment_id) = res.expected_segments
-        ),
-        complete_data AS (
-            SELECT s.*
-            FROM segmented_data s
-            INNER JOIN segments_in_all_years sia
-                ON s.ROUTE_NAME = sia.ROUTE_NAME AND s.segment_id = sia.segment_id
-            WHERE s.ROUTE_NAME IN (SELECT ROUTE_NAME FROM routes_with_all_segments)
-        )"""
-
-
-def _build_combined_query(county_dataset, years, segment_definitions_cte, complete_filter_cte,
-                          segmentation_type, metadata_value, years_list):
-    """Build single combined query: valid_routes + segmentation + complete filter + final pivot + metadata."""
-
+    # valid_routes: routes present in at least 2 of the selected years
     year_columns = [f"MAX(IF(data_year = {y}, 1, 0)) AS y{y}" for y in years]
-
     year_conditions = []
     for i in range(len(years)):
         for j in range(i + 1, len(years)):
@@ -124,163 +124,151 @@ def _build_combined_query(county_dataset, years, segment_definitions_cte, comple
                 condition_parts.append(f"y{years[k]} = 0")
             year_conditions.append("(" + " AND ".join(condition_parts) + ")")
 
-    iri_columns = [f"AVG(IF(data_year = {y}, avg_iri, NULL)) AS iri_{y}" for y in years]
-    index_columns = [f"MAX(IF(data_year = {y}, row_indices, NULL)) AS index_{y}" for y in years]
-    null_checks = [f"iri_{y} IS NOT NULL" for y in years]
+    # Per-year pivot expressions (aggregated per route_key + segment + year already)
+    iri_pivot = [f"MAX(IF(data_year = {y}, year_iri, NULL)) AS iri_{y}" for y in years]
+    index_pivot = [f"MAX(IF(data_year = {y}, row_indices, NULL)) AS index_{y}" for y in years]
+    pivot_cols = list(iri_pivot)
+    if has_liri:
+        pivot_cols += [f"MAX(IF(data_year = {y}, year_liri, NULL)) AS liri_{y}" for y in years]
+    if has_riri:
+        pivot_cols += [f"MAX(IF(data_year = {y}, year_riri, NULL)) AS riri_{y}" for y in years]
+    pivot_cols += index_pivot
+
+    null_checks = ' AND '.join([f"p.iri_{y} IS NOT NULL" for y in years])
+
+    # Final output columns
+    iri_out = ', '.join([f"p.iri_{y}" for y in years])
+    index_out = ', '.join([f"p.index_{y}" for y in years])
+    out_cols = [iri_out]
+    if has_liri:
+        out_cols.append(', '.join([f"p.liri_{y}" for y in years]))
+    if has_riri:
+        out_cols.append(', '.join([f"p.riri_{y}" for y in years]))
+    out_cols.append(index_out)
+    measurement_out = ', '.join(out_cols)
+
+    route_id_select = "g.route_key AS ROUTE_ID,\n           " if has_route_id else ""
 
     return f"""
-    -- Combined pipeline: valid_routes → segmentation → complete filter → final pivot
+    -- Combined pipeline: overlap window -> segment claim -> coords/IRI -> pivot
     CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.distress_final` AS
     WITH valid_routes AS (
-        SELECT ROUTE_NAME
+        SELECT route_key
         FROM (
-            SELECT ROUTE_NAME,
+            SELECT route_key,
                    {', '.join(year_columns)}
             FROM `{PROJECT_ID}.{county_dataset}.all_years`
-            GROUP BY ROUTE_NAME
+            GROUP BY route_key
         )
         WHERE {' OR '.join(year_conditions)}
     ),
     year_bounds AS (
-        SELECT ROUTE_NAME, data_year,
+        SELECT route_key, data_year,
                MIN(FROM_MEASURE) AS year_min,
                MAX(TO_MEASURE) AS year_max
         FROM `{PROJECT_ID}.{county_dataset}.all_years`
-        WHERE ROUTE_NAME IN (SELECT ROUTE_NAME FROM valid_routes)
-        GROUP BY ROUTE_NAME, data_year
+        WHERE route_key IN (SELECT route_key FROM valid_routes)
+        GROUP BY route_key, data_year
     ),
     route_bounds AS (
-        SELECT ROUTE_NAME,
+        SELECT route_key,
                MAX(year_min) AS route_min,
                MIN(year_max) AS route_max
         FROM year_bounds
-        GROUP BY ROUTE_NAME
+        GROUP BY route_key
         HAVING MAX(year_min) < MIN(year_max)
     ),
     year_overlap_check AS (
-        SELECT yb.ROUTE_NAME, yb.data_year,
-               rb.route_min, rb.route_max,
+        SELECT yb.route_key, yb.data_year,
                CASE WHEN yb.year_min <= rb.route_min AND yb.year_max >= rb.route_max
                     THEN 1 ELSE 0 END AS has_full_overlap
         FROM year_bounds yb
-        JOIN route_bounds rb ON yb.ROUTE_NAME = rb.ROUTE_NAME
+        JOIN route_bounds rb ON yb.route_key = rb.route_key
     ),
     valid_routes_with_overlap AS (
-        SELECT ROUTE_NAME
+        SELECT route_key
         FROM year_overlap_check
-        GROUP BY ROUTE_NAME
+        GROUP BY route_key
         HAVING MIN(has_full_overlap) = 1
     ),
     {segment_definitions_cte},
     all_years_with_index AS (
         SELECT *,
-               ROW_NUMBER() OVER (PARTITION BY ROUTE_NAME, data_year ORDER BY FROM_MEASURE) - 1 AS row_index
+               ROW_NUMBER() OVER (PARTITION BY route_key, data_year ORDER BY FROM_MEASURE) - 1 AS row_index
         FROM `{PROJECT_ID}.{county_dataset}.all_years`
-        WHERE ROUTE_NAME IN (SELECT ROUTE_NAME FROM valid_routes_with_overlap)
+        WHERE route_key IN (SELECT route_key FROM valid_routes_with_overlap)
     ),
+    -- Claim each record into every segment it OVERLAPS, then keep only the
+    -- earliest such segment (lowest segment_id) = greedy `used` set.
     data_with_segments_all_matches AS (
-        SELECT d.ROUTE_NAME, d.data_year,
+        SELECT d.route_key, d.ROUTE_NAME, d.data_year,
                sd.segment_id,
-               sd.segment_start,
-               sd.segment_end,
                d.FROM_MEASURE, d.TO_MEASURE,
                d.BEGIN_GLAT, d.BEGIN_GLON, d.END_GLAT, d.END_GLON,
-               d.IRI, d.COUNTY_ID, d.SURFTYPE,
+               d.IRI, d.LIRI, d.RIRI, d.COUNTY_ID, d.SURFTYPE,
                d.row_index,
                ROW_NUMBER() OVER (
-                   PARTITION BY d.ROUTE_NAME, d.data_year, d.row_index
-                   ORDER BY ABS(d.FROM_MEASURE - sd.segment_start)
+                   PARTITION BY d.route_key, d.data_year, d.row_index
+                   ORDER BY sd.segment_id
                ) AS segment_rank
         FROM all_years_with_index d
-        JOIN segment_definitions sd ON d.ROUTE_NAME = sd.ROUTE_NAME
-        WHERE d.ROUTE_NAME IN (SELECT ROUTE_NAME FROM valid_routes_with_overlap)
-          AND d.FROM_MEASURE >= sd.segment_start
-          AND d.FROM_MEASURE < sd.segment_end
+        JOIN segment_definitions sd ON d.route_key = sd.route_key
+        WHERE d.FROM_MEASURE < sd.segment_end
+          AND d.TO_MEASURE > sd.segment_start
     ),
     data_with_segments AS (
-        SELECT ROUTE_NAME, data_year, segment_id, segment_start, segment_end,
-               FROM_MEASURE, TO_MEASURE,
-               BEGIN_GLAT, BEGIN_GLON, END_GLAT, END_GLON,
-               IRI, COUNTY_ID, SURFTYPE, row_index
+        SELECT * EXCEPT(segment_rank)
         FROM data_with_segments_all_matches
         WHERE segment_rank = 1
     ),
-    segment_stats AS (
-        SELECT ROUTE_NAME, data_year, segment_id,
-               MIN(segment_start) AS segment_from_measure,
-               MAX(segment_end) AS segment_to_measure,
+    -- Per route/segment/year: averaged roughness + record bookkeeping
+    segment_year_stats AS (
+        SELECT route_key, segment_id, data_year,
+               AVG(IRI) AS year_iri,
+               AVG(LIRI) AS year_liri,
+               AVG(RIRI) AS year_riri,
                COUNT(*) AS record_count,
-               MAX(COUNTY_ID) AS county_id,
-               MAX(SURFTYPE) AS surftype,
-               AVG(IRI) AS avg_iri,
-               COUNT(IRI) AS iri_count,
                STRING_AGG(CAST(row_index AS STRING), ',' ORDER BY row_index) AS row_indices
         FROM data_with_segments
-        GROUP BY ROUTE_NAME, data_year, segment_id
+        GROUP BY route_key, segment_id, data_year
     ),
-    segment_coords AS (
-        SELECT
-            dws.ROUTE_NAME, dws.data_year, dws.segment_id,
-            ARRAY_AGG(dws.BEGIN_GLAT ORDER BY dws.FROM_MEASURE LIMIT 1)[OFFSET(0)] AS from_lat,
-            ARRAY_AGG(dws.BEGIN_GLON ORDER BY dws.FROM_MEASURE LIMIT 1)[OFFSET(0)] AS from_lon,
-            ARRAY_AGG(dws.END_GLAT ORDER BY dws.FROM_MEASURE DESC LIMIT 1)[OFFSET(0)] AS to_lat,
-            ARRAY_AGG(dws.END_GLON ORDER BY dws.FROM_MEASURE DESC LIMIT 1)[OFFSET(0)] AS to_lon
-        FROM data_with_segments dws
-        GROUP BY dws.ROUTE_NAME, dws.data_year, dws.segment_id
+    segment_pivot AS (
+        SELECT route_key, segment_id,
+               {', '.join(pivot_cols)}
+        FROM segment_year_stats
+        GROUP BY route_key, segment_id
     ),
-    segmented_data AS (
-        SELECT s.ROUTE_NAME, s.data_year, s.segment_id,
-               s.segment_from_measure, s.segment_to_measure,
-               s.record_count,
-               sc.from_lat, sc.from_lon, sc.to_lat, sc.to_lon,
-               s.county_id, s.surftype, s.avg_iri, s.row_indices
-        FROM segment_stats s
-        JOIN segment_coords sc
-            ON s.ROUTE_NAME = sc.ROUTE_NAME
-            AND s.data_year = sc.data_year
-            AND s.segment_id = sc.segment_id
-        WHERE sc.from_lat IS NOT NULL
-          AND sc.from_lon IS NOT NULL
-          AND sc.to_lat IS NOT NULL
-          AND sc.to_lon IS NOT NULL
-    ),
-    {complete_filter_cte},
-    segment_consistency AS (
-        SELECT ROUTE_NAME, segment_id,
-               MIN(from_lat) AS from_lat,
-               MIN(from_lon) AS from_lon,
-               MAX(to_lat) AS to_lat,
-               MAX(to_lon) AS to_lon,
-               AVG(segment_from_measure) AS from_measure,
-               AVG(segment_to_measure) AS to_measure,
-               MAX(surftype) AS surftype,
-               MAX(county_id) AS county_id,
+    -- Per route/segment geometry chosen by MEASURE order across all years:
+    -- begin from smallest FROM_MEASURE, end from largest TO_MEASURE.
+    segment_geo AS (
+        SELECT route_key, segment_id,
+               MAX(ROUTE_NAME) AS ROUTE_NAME,
+               MAX(COUNTY_ID) AS county_id,
+               MAX(SURFTYPE) AS surftype,
+               MIN(FROM_MEASURE) AS from_measure,
+               MAX(TO_MEASURE) AS to_measure,
                COUNT(DISTINCT data_year) AS years_count,
-               {', '.join(iri_columns)},
-               {', '.join(index_columns)},
-               STDDEV(from_lat) AS from_lat_stddev,
-               STDDEV(from_lon) AS from_lon_stddev,
-               STDDEV(to_lat) AS to_lat_stddev,
-               STDDEV(to_lon) AS to_lon_stddev,
-               STDDEV(segment_from_measure) AS from_measure_stddev,
-               STDDEV(segment_to_measure) AS to_measure_stddev
-        FROM complete_data
-        GROUP BY ROUTE_NAME, segment_id
+               ARRAY_AGG(BEGIN_GLAT ORDER BY FROM_MEASURE LIMIT 1)[OFFSET(0)] AS from_lat,
+               ARRAY_AGG(BEGIN_GLON ORDER BY FROM_MEASURE LIMIT 1)[OFFSET(0)] AS from_lon,
+               ARRAY_AGG(END_GLAT ORDER BY TO_MEASURE DESC LIMIT 1)[OFFSET(0)] AS to_lat,
+               ARRAY_AGG(END_GLON ORDER BY TO_MEASURE DESC LIMIT 1)[OFFSET(0)] AS to_lon
+        FROM data_with_segments
+        GROUP BY route_key, segment_id
     )
-    SELECT ROUTE_NAME, segment_id,
-           from_measure, to_measure,
-           ROUND((to_measure - from_measure) * 5280, 2) AS length_ft,
-           from_lat, from_lon, to_lat, to_lon,
-           county_id, surftype,
-           years_count, {', '.join([f"iri_{y}" for y in years])},
-           {', '.join([f"index_{y}" for y in years])}
-    FROM segment_consistency
-    WHERE {' AND '.join(null_checks)}
-      AND from_measure < to_measure
-      AND (from_measure_stddev IS NULL OR from_measure_stddev < 0.01)
-      AND (to_measure_stddev IS NULL OR to_measure_stddev < 0.01)
-      AND years_count = {len(years)}
-    ORDER BY ROUTE_NAME, segment_id;
+    SELECT {route_id_select}g.ROUTE_NAME, g.segment_id,
+           g.from_measure, g.to_measure,
+           ROUND((g.to_measure - g.from_measure) * 5280, 2) AS length_ft,
+           g.from_lat, g.from_lon, g.to_lat, g.to_lon,
+           g.county_id, g.surftype,
+           g.years_count,
+           {measurement_out}
+    FROM segment_geo g
+    JOIN segment_pivot p
+        ON g.route_key = p.route_key AND g.segment_id = p.segment_id
+    WHERE g.years_count = {num_years}
+      AND g.from_measure < g.to_measure
+      AND {null_checks}
+    ORDER BY g.route_key, g.segment_id;
 
     -- Store metadata in same script execution
     CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.segmentation_metadata` AS
@@ -392,57 +380,60 @@ def process_data(
         # Extract years from table names
         years = [re.sub(r'[^0-9]', '', table.replace('raw_distress_', '')) for table in tables]
         years_list = ', '.join(years)
+        num_years = len(years)
 
-        logger.info(f"Pipeline starting: {len(years)} years for {county_name} ({years_list}), type={segmentation_type}")
+        # Inspect raw table columns to detect ROUTE_ID / LIRI / RIRI availability
+        table_list_sql = ', '.join([f"'{t}'" for t in tables])
+        cols_query = f"""
+        SELECT table_name, column_name
+        FROM `{PROJECT_ID}.{county_dataset}.INFORMATION_SCHEMA.COLUMNS`
+        WHERE table_name IN ({table_list_sql})
+        """
+        table_cols = {}
+        for row in client.query(cols_query).result():
+            table_cols.setdefault(row.table_name, set()).add(row.column_name.upper())
+
+        # ROUTE_ID is the unique key only if present in EVERY selected year table.
+        has_route_id = all('ROUTE_ID' in table_cols.get(t, set()) for t in tables)
+        has_liri = any('LIRI' in cols for cols in table_cols.values())
+        has_riri = any('RIRI' in cols for cols in table_cols.values())
+
+        key_label = 'ROUTE_ID' if has_route_id else 'ROUTE_NAME'
+        logger.info(f"Pipeline starting: {num_years} years for {county_name} ({years_list}), "
+                    f"type={segmentation_type}, key={key_label}, liri={has_liri}, riri={has_riri}")
 
         # === QUERY 1: Build all_years table (UNION ALL raw tables) ===
-        union_parts = []
-        for table in tables:
-            year = re.sub(r'[^0-9]', '', table)
-            union_parts.append(f"""
-                SELECT ROUTE_NAME, FROM_MEASURE, TO_MEASURE,
-                       BEGIN_GLAT, BEGIN_GLON, END_GLAT, END_GLON,
-                       IRI, COUNTY_ID, SURFTYPE,
-                       {year} AS data_year
-                FROM `{PROJECT_ID}.{county_dataset}.{table}`
-                WHERE ROUTE_NAME IS NOT NULL
-                  AND FROM_MEASURE IS NOT NULL
-                  AND TO_MEASURE IS NOT NULL
-                  AND BEGIN_GLAT IS NOT NULL
-                  AND BEGIN_GLON IS NOT NULL
-                  AND END_GLAT IS NOT NULL
-                  AND END_GLON IS NOT NULL
-            """)
-
+        union_body = _build_union(tables, county_dataset, table_cols,
+                                  has_route_id, has_liri, has_riri)
         combined_query = f"""
         CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.all_years` AS
-        {' UNION ALL '.join(union_parts)}
+        {union_body}
         """
         logger.info(f"Query 1/3: Creating all_years table")
         client.query(combined_query).result()
 
-        # === QUERY 2: Combined pipeline (valid_routes → segment → filter → pivot → metadata) ===
+        # === QUERY 2: Combined pipeline (overlap -> segment -> coords/IRI -> pivot) ===
         if segmentation_type == "fixed":
             segment_cte = _build_fixed_segment_cte(num_segments)
-            complete_filter_cte = _build_complete_filter_fixed(num_segments, len(years))
         else:
             segment_cte = _build_distance_segment_cte(segment_distance)
-            complete_filter_cte = _build_complete_filter_distance(len(years))
 
         metadata_value = num_segments if segmentation_type == "fixed" else segment_distance
 
         combined_pipeline = _build_combined_query(
-            county_dataset, years, segment_cte, complete_filter_cte,
-            segmentation_type, metadata_value, years_list
+            county_dataset, years, segment_cte,
+            segmentation_type, metadata_value, years_list,
+            num_years, has_route_id, has_liri, has_riri
         )
         logger.info(f"Query 2/3: Running combined segmentation pipeline")
         client.query(combined_pipeline).result()
 
         # === QUERY 3: Get final statistics ===
+        distinct_route = "ROUTE_ID" if has_route_id else "ROUTE_NAME"
         stats_query = f"""
         SELECT
             COUNT(*) AS total_rows,
-            COUNT(DISTINCT ROUTE_NAME) AS unique_routes,
+            COUNT(DISTINCT {distinct_route}) AS unique_routes,
             CAST(COUNT(*) / GREATEST({num_segments}, 1) AS INT64) AS expected_routes
         FROM `{PROJECT_ID}.{county_dataset}.distress_final`
         """

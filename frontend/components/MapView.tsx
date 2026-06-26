@@ -1,6 +1,8 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { createRoot } from 'react-dom/client'
+import type { Root as ReactDOMRoot } from 'react-dom/client'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import IRIBarChart from './IRIBarChart'
@@ -14,6 +16,8 @@ interface MapSegment {
   to_lon: number
   surftype?: string
   iriData?: { year: string; iri: number }[]
+  liriData?: { year: string; liri: number | null }[]
+  ririData?: { year: string; riri: number | null }[]
   length?: number
 }
 
@@ -238,83 +242,108 @@ export default function MapView({ selectedSegments }: MapViewProps) {
         }
       })
 
-      // Click to select segment - bold + white outline
-      polyline.on('click', () => {
-        setHoveredSegment(null)
-        setTimeout(() => setHoveredSegment(segment), 0)
-      })
-
-      // Add popup with segment info and Show Plot button
+      // Build popup HTML — chart container starts hidden, toggled by checkbox
       const iriForSelectedYear = viewMode === 'iri-range' && selectedYear
         ? segment.iriData?.find(data => data.year === selectedYear)?.iri
         : null
 
+      const hasIriData = segment.iriData && segment.iriData.length > 0
+
       const popupContent = `
-        <div class="text-sm" style="min-width: 200px;">
-          <strong>${segment.route_name}</strong><br/>
-          Segment: ${segment.segment_id}<br/>
-          Surface: ${segment.surftype || 'N/A'}<br/>
-          Length: ${(segment.length || 0).toFixed(2)} ft
-          ${viewMode === 'iri-range' && selectedYear ? `
-            <br/>IRI (${selectedYear}): ${iriForSelectedYear !== undefined && iriForSelectedYear !== null ? iriForSelectedYear.toFixed(1) : 'N/A'}
-          ` : ''}
-          <div style="margin-top: 8px; display: flex; gap: 6px;">
-            ${segment.iriData && segment.iriData.length > 0 ? `
-              <button
-                id="show-plot-${index}"
-                style="background-color: #3B82F6; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; flex: 1; font-weight: 500; font-size: 12px;"
-                onmouseover="this.style.backgroundColor='#2563EB'"
-                onmouseout="this.style.backgroundColor='#3B82F6'"
-              >
-                📊 IRI Plot
-              </button>
-            ` : ''}
-            <button
-              id="street-view-${index}"
-              style="background-color: #F59E0B; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; flex: 1; font-weight: 500; font-size: 12px;"
-              onmouseover="this.style.backgroundColor='#D97706'"
-              onmouseout="this.style.backgroundColor='#F59E0B'"
-            >
+        <div style="font-family: system-ui, sans-serif; min-width: 210px;">
+          <div style="font-weight: 600; font-size: 13px; color: #1e293b; margin-bottom: 2px;">${segment.route_name}</div>
+          <div style="font-size: 11px; color: #64748b; line-height: 1.6;">
+            Seg&nbsp;${segment.segment_id}&nbsp;&nbsp;·&nbsp;&nbsp;${segment.surftype || 'N/A'}&nbsp;&nbsp;·&nbsp;&nbsp;${(segment.length || 0).toFixed(0)}&nbsp;ft
+            ${viewMode === 'iri-range' && selectedYear && iriForSelectedYear != null
+              ? `<br/>IRI&nbsp;(${selectedYear}):&nbsp;<strong>${iriForSelectedYear.toFixed(1)}</strong>`
+              : ''}
+          </div>
+          <div style="margin-top: 6px; display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+            ${hasIriData ? `
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px;color:#374151;user-select:none;">
+                <input type="checkbox" id="plot-toggle-${index}" style="cursor:pointer;accent-color:#3B82F6;width:13px;height:13px;" />
+                IRI Plot
+              </label>
+            ` : '<span></span>'}
+            <button id="street-view-${index}"
+              style="background:#F59E0B;color:white;border:none;padding:3px 9px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:500;">
               🛣️ Street View
             </button>
           </div>
+          ${hasIriData ? `<div id="iri-chart-${index}" style="display:none;margin-top:6px;border-top:1px solid #e2e8f0;padding-top:6px;"></div>` : ''}
         </div>
       `
 
-      const popup = L.popup().setContent(popupContent)
+      const popup = L.popup({ maxWidth: 290 }).setContent(popupContent)
       polyline.bindPopup(popup)
 
-      // Add click handlers after popup opens
-      polyline.on('popupopen', () => {
-        const plotBtn = document.getElementById(`show-plot-${index}`)
-        if (plotBtn) {
-          plotBtn.addEventListener('click', () => {
-            // Clear first to force re-trigger even if same segment
-            setHoveredSegment(null)
-            setTimeout(() => {
-              setHoveredSegment(segment)
-            }, 0)
-            polyline.closePopup()
-          })
+      // Per-popup chart root (scoped to this polyline's closure)
+      const chartState: { root: ReactDOMRoot | null; cleanup: (() => void) | null } = { root: null, cleanup: null }
+
+      polyline.on('popupopen', (e: L.LeafletEvent) => {
+        const popupInstance = (e as any).popup as L.Popup
+        setHoveredSegment(segment)
+
+        // IRI plot toggle
+        if (hasIriData) {
+          const checkbox = document.getElementById(`plot-toggle-${index}`) as HTMLInputElement | null
+          const chartContainer = document.getElementById(`iri-chart-${index}`) as HTMLDivElement | null
+
+          if (checkbox && chartContainer) {
+            const handleToggle = () => {
+              if (checkbox.checked) {
+                chartContainer.style.display = 'block'
+                if (!chartState.root) {
+                  chartState.root = createRoot(chartContainer)
+                }
+                chartState.root.render(
+                  <IRIBarChart
+                    compact
+                    segmentData={{
+                      route_name: segment.route_name,
+                      segment_id: segment.segment_id,
+                      iriData: segment.iriData || [],
+                      liriData: segment.liriData,
+                      ririData: segment.ririData,
+                    }}
+                  />
+                )
+                setTimeout(() => popupInstance?.update?.(), 60)
+              } else {
+                chartContainer.style.display = 'none'
+                popupInstance?.update?.()
+              }
+            }
+            checkbox.addEventListener('change', handleToggle)
+            chartState.cleanup = () => checkbox.removeEventListener('change', handleToggle)
+          }
         }
 
+        // Street View
         const svBtn = document.getElementById(`street-view-${index}`)
         if (svBtn) {
           svBtn.addEventListener('click', () => {
             const lat = (segment.from_lat + segment.to_lat) / 2
             const lon = (segment.from_lon + segment.to_lon) / 2
-            // Calculate heading from segment start to end
             const dLon = (segment.to_lon - segment.from_lon) * Math.PI / 180
-            const y = Math.sin(dLon) * Math.cos(segment.to_lat * Math.PI / 180)
-            const x = Math.cos(segment.from_lat * Math.PI / 180) * Math.sin(segment.to_lat * Math.PI / 180) -
+            const sy = Math.sin(dLon) * Math.cos(segment.to_lat * Math.PI / 180)
+            const sx = Math.cos(segment.from_lat * Math.PI / 180) * Math.sin(segment.to_lat * Math.PI / 180) -
                       Math.sin(segment.from_lat * Math.PI / 180) * Math.cos(segment.to_lat * Math.PI / 180) * Math.cos(dLon)
-            const heading = ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360
+            const heading = ((Math.atan2(sy, sx) * 180 / Math.PI) + 360) % 360
             window.open(
               `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lon}&heading=${Math.round(heading)}&pitch=0&fov=90`,
               '_blank'
             )
           })
         }
+      })
+
+      polyline.on('popupclose', () => {
+        setHoveredSegment(null)
+        chartState.cleanup?.()
+        chartState.cleanup = null
+        chartState.root?.unmount()
+        chartState.root = null
       })
 
       newLayers.push(polyline)
@@ -562,27 +591,6 @@ export default function MapView({ selectedSegments }: MapViewProps) {
         </div>
       )}
 
-      {/* IRI Bar Chart - shows on click */}
-      {hoveredSegment && hoveredSegment.iriData && hoveredSegment.iriData.length > 0 && (
-        <div className="absolute bottom-4 left-4 z-[1000] max-w-md">
-          <div className="relative">
-            <button
-              onClick={() => setHoveredSegment(null)}
-              className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs font-bold hover:bg-red-600 shadow-lg z-10"
-              title="Close"
-            >
-              ×
-            </button>
-            <IRIBarChart
-              segmentData={{
-                route_name: hoveredSegment.route_name,
-                segment_id: hoveredSegment.segment_id,
-                iriData: hoveredSegment.iriData
-              }}
-            />
-          </div>
-        </div>
-      )}
 
       {/* Empty state message */}
       {selectedSegments.length === 0 && (

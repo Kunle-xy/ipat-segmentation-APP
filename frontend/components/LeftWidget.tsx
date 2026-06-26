@@ -38,6 +38,8 @@ interface LeftWidgetProps {
   setTableHeight: (height: number) => void;
   hasResults: boolean;
   handleDeleteCounty: (county: string) => Promise<void>;
+  countyId: string;
+  setCountyId: (id: string) => void;
 }
 
 function LeftWidget({
@@ -75,6 +77,8 @@ function LeftWidget({
   setTableHeight,
   hasResults,
   handleDeleteCounty,
+  countyId,
+  setCountyId,
 }: LeftWidgetProps) {
   const [open, setOpen] = useState(true);
   const [isResizing, setIsResizing] = useState(false);
@@ -337,6 +341,21 @@ function LeftWidget({
               placeholder="e.g., Polk, Linn, Scott"
               disabled={loading}
               className="w-full bg-slate-800 text-sm px-3 py-2 rounded-lg border border-slate-600 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">
+              County ID <span className="text-slate-500">(optional — filters data to one county)</span>
+            </label>
+            <input
+              type="number"
+              min="1"
+              value={countyId}
+              onChange={(e) => setCountyId(e.target.value)}
+              placeholder="e.g., 57"
+              disabled={loading}
+              className="w-full bg-slate-800 text-sm px-3 py-2 rounded-lg border border-slate-600 focus:outline-none focus:border-blue-500 disabled:opacity-50 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
             />
           </div>
         </div>

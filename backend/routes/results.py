@@ -48,17 +48,21 @@ def get_results(
                 detail=f"No processed results found for {county_name} county. Please upload data and run the segmentation process first (Step 1 & 2)."
             )
 
+        # Inspect schema once — drives both column selection and ORDER BY
+        table_obj = client.get_table(table_ref)
+        schema_names = {field.name for field in table_obj.schema}
+        has_route_id = 'ROUTE_ID' in schema_names
+        order_by = "ROUTE_ID, segment_id" if has_route_id else "ROUTE_NAME, segment_id"
+        route_id_col = "ROUTE_ID, " if has_route_id else ""
+
         # Build column selection based on selected years
         if selected_years:
             selected_year_list = [y.strip() for y in selected_years.split(',')]
             logger.info(f"Fetching results filtered to years: {selected_year_list}")
 
-            # Get available IRI columns from the table schema
-            table = client.get_table(table_ref)
-            available_iri_cols = [field.name for field in table.schema if field.name.startswith('iri_')]
+            available_iri_cols = [field.name for field in table_obj.schema if field.name.startswith('iri_')]
             available_years = [col.replace('iri_', '') for col in available_iri_cols]
 
-            # Filter to only include years that exist in the processed data
             valid_years = [year for year in selected_year_list if year in available_years]
 
             if not valid_years:
@@ -73,15 +77,26 @@ def get_results(
 
             logger.info(f"Using valid years: {valid_years}")
 
-            # Select only IRI and index columns for valid years
             iri_cols = ', '.join([f'iri_{year}' for year in valid_years])
             index_cols = ', '.join([f'index_{year}' for year in valid_years])
+
+            # Include liri_/riri_ columns only for years where they exist in the schema
+            available_liri = {field.name for field in table_obj.schema if field.name.startswith('liri_')}
+            available_riri = {field.name for field in table_obj.schema if field.name.startswith('riri_')}
+            liri_cols = ', '.join([f'liri_{year}' for year in valid_years if f'liri_{year}' in available_liri])
+            riri_cols = ', '.join([f'riri_{year}' for year in valid_years if f'riri_{year}' in available_riri])
+            lr_clause = ''
+            if liri_cols:
+                lr_clause += f', {liri_cols}'
+            if riri_cols:
+                lr_clause += f', {riri_cols}'
+
             select_clause = f"""
-                ROUTE_NAME, segment_id,
+                {route_id_col}ROUTE_NAME, segment_id,
                 from_measure, to_measure, length_ft,
                 from_lat, from_lon, to_lat, to_lon,
                 county_id, surftype,
-                years_count, {iri_cols}, {index_cols}
+                years_count, {iri_cols}, {index_cols}{lr_clause}
             """
 
             where_conditions = ' AND '.join([f'iri_{year} IS NOT NULL' for year in valid_years])
@@ -105,7 +120,7 @@ def get_results(
         SELECT {select_clause}
         FROM `{PROJECT_ID}.{county_dataset}.distress_final`
         {where_clause}
-        ORDER BY ROUTE_NAME, segment_id
+        ORDER BY {order_by}
         LIMIT {limit}
         OFFSET {offset}
         """

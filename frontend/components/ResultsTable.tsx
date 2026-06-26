@@ -46,29 +46,30 @@ export default function ResultsTable({
     return true
   }
 
-  // Separate IRI and index columns from others (memoized)
-  const { iriColumns, indexColumns, otherColumns } = useMemo(() => {
+  // Separate IRI, LIRI, RIRI, index columns from others (memoized)
+  const { iriColumns, liriColumns, ririColumns, indexColumns, otherColumns } = useMemo(() => {
     if (!data || !data.data || data.data.length === 0) {
-      return { iriColumns: [], indexColumns: [], otherColumns: [] }
+      return { iriColumns: [], liriColumns: [], ririColumns: [], indexColumns: [], otherColumns: [] }
     }
     const columns = Object.keys(data.data[0])
     let iriCols = columns.filter(col => col.startsWith('iri_')).sort()
+    let liriCols = columns.filter(col => col.startsWith('liri_')).sort()
+    let ririCols = columns.filter(col => col.startsWith('riri_')).sort()
     let indexCols = columns.filter(col => col.startsWith('index_')).sort()
-    const otherCols = columns.filter(col => !col.startsWith('iri_') && !col.startsWith('index_'))
+    const otherCols = columns.filter(
+      col => !col.startsWith('iri_') && !col.startsWith('liri_') &&
+             !col.startsWith('riri_') && !col.startsWith('index_')
+    )
 
-    // Filter IRI and index columns based on selected years
+    // Filter year-specific columns based on selected years
     if (selectedYears.length > 0) {
-      iriCols = iriCols.filter(col => {
-        const year = col.replace('iri_', '')
-        return selectedYears.includes(year)
-      })
-      indexCols = indexCols.filter(col => {
-        const year = col.replace('index_', '')
-        return selectedYears.includes(year)
-      })
+      iriCols = iriCols.filter(col => selectedYears.includes(col.replace('iri_', '')))
+      liriCols = liriCols.filter(col => selectedYears.includes(col.replace('liri_', '')))
+      ririCols = ririCols.filter(col => selectedYears.includes(col.replace('riri_', '')))
+      indexCols = indexCols.filter(col => selectedYears.includes(col.replace('index_', '')))
     }
 
-    return { iriColumns: iriCols, indexColumns: indexCols, otherColumns: otherCols }
+    return { iriColumns: iriCols, liriColumns: liriCols, ririColumns: ririCols, indexColumns: indexCols, otherColumns: otherCols }
   }, [data, selectedYears])
 
   // Apply filters (memoized to prevent infinite loops)
@@ -179,8 +180,8 @@ export default function ResultsTable({
   const exportToCSV = () => {
     if (filteredData.length === 0) return
 
-    // Combine all columns in proper order: other columns, then IRI columns, then index columns
-    const allColumns = [...otherColumns, ...iriColumns, ...indexColumns]
+    // Combine all columns in proper order
+    const allColumns = [...otherColumns, ...iriColumns, ...liriColumns, ...ririColumns, ...indexColumns]
 
     // Create CSV header
     const header = allColumns.map(col => col.replace(/_/g, ' ').toUpperCase()).join(',')
@@ -296,7 +297,25 @@ export default function ResultsTable({
               {iriColumns.map(column => (
                 <th
                   key={column}
-                  className="px-2 py-2 text-left text-[10px] font-medium text-gray-500 uppercase tracking-tight whitespace-nowrap bg-gray-50"
+                  className="px-2 py-2 text-left text-[10px] font-medium text-blue-700 uppercase tracking-tight whitespace-nowrap bg-blue-50"
+                >
+                  {column.replace(/_/g, ' ')}
+                </th>
+              ))}
+              {liriColumns.map(column => (
+                <th
+                  key={column}
+                  className="px-2 py-2 text-left text-[10px] font-medium text-green-700 uppercase tracking-tight whitespace-nowrap bg-green-50"
+                  title="Left wheel IRI"
+                >
+                  {column.replace(/_/g, ' ')}
+                </th>
+              ))}
+              {ririColumns.map(column => (
+                <th
+                  key={column}
+                  className="px-2 py-2 text-left text-[10px] font-medium text-amber-700 uppercase tracking-tight whitespace-nowrap bg-amber-50"
+                  title="Right wheel IRI"
                 >
                   {column.replace(/_/g, ' ')}
                 </th>
@@ -304,7 +323,7 @@ export default function ResultsTable({
               {indexColumns.map(column => (
                 <th
                   key={column}
-                  className="px-1.5 py-2 text-left text-[8px] font-medium text-blue-600 uppercase tracking-tight whitespace-nowrap bg-blue-50"
+                  className="px-1.5 py-2 text-left text-[8px] font-medium text-purple-600 uppercase tracking-tight whitespace-nowrap bg-purple-50"
                   title="Row indices used for this segment"
                 >
                   {column.replace(/_/g, ' ')}
@@ -347,9 +366,25 @@ export default function ResultsTable({
                 {iriColumns.map(column => (
                   <td
                     key={column}
-                    className="px-2 py-1 text-[11px] text-gray-900 whitespace-nowrap"
+                    className="px-2 py-1 text-[11px] text-blue-900 whitespace-nowrap bg-blue-50/30"
                   >
-                    {row[column] ? row[column].toFixed(4) : 'N/A'}
+                    {row[column] != null ? Number(row[column]).toFixed(2) : 'N/A'}
+                  </td>
+                ))}
+                {liriColumns.map(column => (
+                  <td
+                    key={column}
+                    className="px-2 py-1 text-[11px] text-green-900 whitespace-nowrap bg-green-50/30"
+                  >
+                    {row[column] != null ? Number(row[column]).toFixed(2) : 'N/A'}
+                  </td>
+                ))}
+                {ririColumns.map(column => (
+                  <td
+                    key={column}
+                    className="px-2 py-1 text-[11px] text-amber-900 whitespace-nowrap bg-amber-50/30"
+                  >
+                    {row[column] != null ? Number(row[column]).toFixed(2) : 'N/A'}
                   </td>
                 ))}
                 {indexColumns.map(column => {
@@ -360,7 +395,7 @@ export default function ResultsTable({
                   return (
                     <td
                       key={column}
-                      className="px-1.5 py-1 text-[8px] text-blue-600 whitespace-nowrap bg-blue-50/50 font-mono"
+                      className="px-1.5 py-1 text-[8px] text-purple-600 whitespace-nowrap bg-purple-50/50 font-mono"
                       title={`Row indices: ${val}`}
                     >
                       {display}

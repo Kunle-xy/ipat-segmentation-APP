@@ -126,6 +126,7 @@ export default function Home() {
   const [segmentationMetadata, setSegmentationMetadata] = useState<SegmentationMetadata | null>(null)
   const [showAnalysisCompleteModal, setShowAnalysisCompleteModal] = useState(false)
   const [analysisCompleteData, setAnalysisCompleteData] = useState<AnalysisCompleteData | null>(null)
+  const [countyId, setCountyId] = useState('')
 
   // Get selected segments for map with IRI data (memoized to prevent infinite loops)
   const selectedSegments = useMemo(() => {
@@ -133,20 +134,32 @@ export default function Home() {
       const row = filteredData[index]
       if (!row) return null
 
-      // Extract IRI data from all iri_YYYY columns
-      const iriData: { year: string; iri: number }[] = []
       const columns = Object.keys(row)
-      const iriColumns = columns.filter(col => col.startsWith('iri_')).sort()
 
-      iriColumns.forEach(col => {
+      // IRI (avg)
+      const iriData: { year: string; iri: number }[] = []
+      columns.filter(col => col.startsWith('iri_')).sort().forEach(col => {
         const year = col.replace('iri_', '')
-        const iriValue = row[col]
-        if (iriValue !== null && iriValue !== undefined && !isNaN(Number(iriValue))) {
-          iriData.push({
-            year: String(year),
-            iri: Number(iriValue)
-          })
+        const v = row[col]
+        if (v !== null && v !== undefined && !isNaN(Number(v))) {
+          iriData.push({ year: String(year), iri: Number(v) })
         }
+      })
+
+      // LIRI (left wheel)
+      const liriData: { year: string; liri: number | null }[] = []
+      columns.filter(col => col.startsWith('liri_')).sort().forEach(col => {
+        const year = col.replace('liri_', '')
+        const v = row[col]
+        liriData.push({ year: String(year), liri: v !== null && v !== undefined && !isNaN(Number(v)) ? Number(v) : null })
+      })
+
+      // RIRI (right wheel)
+      const ririData: { year: string; riri: number | null }[] = []
+      columns.filter(col => col.startsWith('riri_')).sort().forEach(col => {
+        const year = col.replace('riri_', '')
+        const v = row[col]
+        ririData.push({ year: String(year), riri: v !== null && v !== undefined && !isNaN(Number(v)) ? Number(v) : null })
       })
 
       return {
@@ -158,7 +171,9 @@ export default function Home() {
         to_lon: row.to_lon,
         surftype: row.surftype,
         length: row.length_ft,
-        iriData: iriData
+        iriData,
+        liriData: liriData.length > 0 ? liriData : undefined,
+        ririData: ririData.length > 0 ? ririData : undefined,
       }
     }).filter(Boolean)
   }, [selectedRows, filteredData])
@@ -240,34 +255,33 @@ export default function Home() {
     setError(null)
     setUploadProgress({ current: 0, total: files.length, currentFile: '' })
 
-    // Track successful uploads locally (don't rely on async state)
     let hasSuccessfulUploads = false
 
-    // Upload files one by one sequentially
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
       setUploadProgress({ current: i + 1, total: files.length, currentFile: file.name })
-
-      // Add file to list with uploading status
       setUploadedFiles(prev => [...prev, { filename: file.name, status: 'uploading' }])
 
       try {
-        const formData = new FormData()
-        formData.append('files', file)
+        const county = countyName.trim().toLowerCase()
 
-        const response = await axios.post(`${API_URL}/upload`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-          params: { county_name: countyName.trim().toLowerCase() },
-          onUploadProgress: (progressEvent) => {
-            // This shows upload progress for individual file
-            const percentCompleted = progressEvent.total
-              ? Math.round((progressEvent.loaded * 100) / progressEvent.total)
-              : 0
-            // We can use this for more granular progress if needed
-          }
+        // 1. Get a signed URL to upload the file straight to Cloud Storage.
+        //    This bypasses Cloud Run's 32MB request-body limit.
+        const urlResp = await axios.post(`${API_URL}/upload-url`, null, {
+          params: { county_name: county, filename: file.name }
+        })
+        const { upload_url, blob_path } = urlResp.data
+
+        // 2. PUT the file directly to GCS (no size limit on this request).
+        await axios.put(upload_url, file, {
+          headers: { 'Content-Type': file.type || 'application/octet-stream' }
         })
 
-        // Update file status to success
+        // 3. Tell the backend to ingest the staged file into BigQuery.
+        const response = await axios.post(`${API_URL}/ingest`, null, {
+          params: { county_name: county, blob_path, filename: file.name }
+        })
+
         setUploadedFiles(prev =>
           prev.map(f =>
             f.filename === file.name && f.status === 'uploading'
@@ -275,11 +289,8 @@ export default function Home() {
               : f
           )
         )
-
-        // Mark that we had at least one successful upload
         hasSuccessfulUploads = true
       } catch (err: any) {
-        // Update file status to error
         setUploadedFiles(prev =>
           prev.map(f =>
             f.filename === file.name && f.status === 'uploading'
@@ -293,10 +304,8 @@ export default function Home() {
     setIsUploading(false)
     setUploadProgress({ current: 0, total: 0, currentFile: '' })
 
-    // If uploads were successful, fetch tables and set flag
     if (hasSuccessfulUploads) {
       setCountyHasTables(true)
-      // Add small delay to ensure BigQuery metadata is updated
       setTimeout(() => {
         fetchCountyTables()
       }, 1000)
@@ -329,6 +338,10 @@ export default function Home() {
         params.num_segments = numSegments
       } else {
         params.segment_distance = segmentDistance
+      }
+
+      if (countyId.trim()) {
+        params.county_id = countyId.trim()
       }
 
       const response = await axios.post(`${API_URL}/process`, null, { params })
@@ -665,6 +678,10 @@ export default function Home() {
         params.segment_distance = segmentDistance
       }
 
+      if (countyId.trim()) {
+        params.county_id = countyId.trim()
+      }
+
       const response = await axios.post(`${API_URL}/process`, null, { params })
 
       console.log('✅ Reprocessing completed:', response.data)
@@ -795,6 +812,8 @@ export default function Home() {
           setTableHeight={setTableHeight}
           hasResults={!!results}
           handleDeleteCounty={handleDeleteCounty}
+          countyId={countyId}
+          setCountyId={setCountyId}
         />
 
         {/* Right Content Area (Map + Optional Table) */}

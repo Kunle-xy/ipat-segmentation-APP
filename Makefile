@@ -266,10 +266,12 @@ deploy-setup:
 deploy-build:
 	@echo "$(BLUE)Building and pushing images...$(NC)"
 	@echo "Building backend..."
-	docker build -t $(AR_REPO)/ipat-backend:latest --target production ./backend
+	# --no-cache: the legacy Docker builder mis-caches --target production layers,
+	# shipping stale code. Force a clean rebuild until buildx/BuildKit is available.
+	docker build --no-cache -t $(AR_REPO)/ipat-backend:latest --target production ./backend
 	docker push $(AR_REPO)/ipat-backend:latest
 	@echo "Building frontend..."
-	docker build -t $(AR_REPO)/ipat-frontend:latest --target production \
+	docker build --no-cache -t $(AR_REPO)/ipat-frontend:latest --target production \
 		--build-arg NEXT_PUBLIC_API_URL=$$(gcloud run services describe ipat-backend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)' 2>/dev/null || echo "https://ipat-backend-placeholder.run.app") \
 		./frontend
 	docker push $(AR_REPO)/ipat-frontend:latest
@@ -278,8 +280,11 @@ deploy-build:
 ## deploy-backend: Deploy backend to Cloud Run
 deploy-backend:
 	@echo "$(BLUE)Deploying backend to Cloud Run...$(NC)"
+	# Deploy by immutable digest (not :latest) so the new image is always used,
+	# regardless of tag-resolution caching.
+	$(eval BACKEND_DIGEST := $(shell gcloud artifacts docker images describe $(AR_REPO)/ipat-backend:latest --format='value(image_summary.digest)' --project=$(GCP_PROJECT) 2>/dev/null))
 	gcloud run deploy ipat-backend \
-		--image=$(AR_REPO)/ipat-backend:latest \
+		--image=$(AR_REPO)/ipat-backend@$(BACKEND_DIGEST) \
 		--region=$(GCP_REGION) \
 		--project=$(GCP_PROJECT) \
 		--platform=managed \
@@ -291,7 +296,9 @@ deploy-backend:
 		--min-instances=0 \
 		--allow-unauthenticated \
 		--set-env-vars="GCP_PROJECT_ID=$(GCP_PROJECT),GCP_DATASET_ID=ipat_dataset,LOG_LEVEL=WARNING" \
-		--service-account=$(shell gcloud iam service-accounts list --project=$(GCP_PROJECT) --filter="email~ipat" --format="value(email)" 2>/dev/null || echo "default")
+		--service-account=$(shell gcloud iam service-accounts list --project=$(GCP_PROJECT) --filter="email~cloudrun" --format="value(email)" 2>/dev/null | head -n1 || echo "default")
+	# Ensure 100% traffic goes to the new revision (services can otherwise pin to an old one).
+	gcloud run services update-traffic ipat-backend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --to-latest
 	@echo "$(GREEN)✓ Backend deployed!$(NC)"
 	@echo "$(BLUE)Backend URL:$(NC)"
 	@gcloud run services describe ipat-backend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)'
@@ -302,12 +309,13 @@ deploy-frontend:
 	$(eval BACKEND_URL := $(shell gcloud run services describe ipat-backend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)'))
 	@echo "Backend URL: $(BACKEND_URL)"
 	@echo "Rebuilding frontend with backend URL..."
-	docker build -t $(AR_REPO)/ipat-frontend:latest --target production \
+	docker build --no-cache -t $(AR_REPO)/ipat-frontend:latest --target production \
 		--build-arg NEXT_PUBLIC_API_URL=$(BACKEND_URL) \
 		./frontend
 	docker push $(AR_REPO)/ipat-frontend:latest
+	$(eval FRONTEND_DIGEST := $(shell gcloud artifacts docker images describe $(AR_REPO)/ipat-frontend:latest --format='value(image_summary.digest)' --project=$(GCP_PROJECT) 2>/dev/null))
 	gcloud run deploy ipat-frontend \
-		--image=$(AR_REPO)/ipat-frontend:latest \
+		--image=$(AR_REPO)/ipat-frontend@$(FRONTEND_DIGEST) \
 		--region=$(GCP_REGION) \
 		--project=$(GCP_PROJECT) \
 		--platform=managed \
@@ -319,12 +327,13 @@ deploy-frontend:
 		--min-instances=0 \
 		--allow-unauthenticated \
 		--set-env-vars="NODE_ENV=production"
+	gcloud run services update-traffic ipat-frontend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --to-latest
 	@echo "$(GREEN)✓ Frontend deployed!$(NC)"
 	@echo "$(BLUE)Frontend URL:$(NC)"
 	@gcloud run services describe ipat-frontend --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format='value(status.url)'
 
-## deploy: Full deployment (build + deploy backend + frontend)
-deploy: deploy-setup deploy-build deploy-backend deploy-frontend
+## deploy: Full deployment (build + deploy backend + frontend + CORS)
+deploy: deploy-setup deploy-build deploy-backend deploy-frontend deploy-update-cors
 	@echo ""
 	@echo "$(GREEN)================================$(NC)"
 	@echo "$(GREEN)Cloud Run Deployment Complete!$(NC)"

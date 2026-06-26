@@ -3,6 +3,7 @@
 import { useState, useRef } from 'react'
 
 const REQUIRED_COLUMNS = [
+  { name: 'ROUTE_ID', description: 'Unique route identifier (numeric)' },
   { name: 'ROUTE_NAME', description: 'Road identifier (e.g., S001, I035)' },
   { name: 'FROM_MEASURE', description: 'Start milepost of the section' },
   { name: 'TO_MEASURE', description: 'End milepost of the section' },

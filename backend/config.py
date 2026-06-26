@@ -15,9 +15,15 @@ PROJECT_ID = os.getenv("GCP_PROJECT_ID", "vernal-citadel-479904-i2")
 DATASET_ID = os.getenv("GCP_DATASET_ID", "ipat_dataset")
 CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 
+# GCS bucket used for direct browser uploads (bypasses Cloud Run's 32MB
+# request-body limit). Files are PUT straight to GCS via a signed URL, then
+# ingested server-side.
+GCS_UPLOAD_BUCKET = os.getenv("GCS_UPLOAD_BUCKET", f"ipat-uploads-{PROJECT_ID}")
+
 # Lazy initialization for BigQuery client
 _client = None
 _credentials = None
+_storage_client = None
 
 
 def get_bigquery_client():
@@ -40,6 +46,57 @@ def get_credentials():
     if _credentials is None:
         get_bigquery_client()
     return _credentials
+
+
+def get_storage_client():
+    """Get a Cloud Storage client (lazy), using the same service-account
+    credentials as BigQuery so it can mint signed upload URLs."""
+    global _storage_client
+    if _storage_client is None:
+        from google.cloud import storage
+        creds = get_credentials()
+        if creds is not None:
+            _storage_client = storage.Client(project=PROJECT_ID, credentials=creds)
+        else:
+            _storage_client = storage.Client(project=PROJECT_ID)
+    return _storage_client
+
+
+def generate_put_signed_url(blob_path, minutes=30):
+    """Generate a v4 signed URL for a PUT upload to the uploads bucket.
+
+    Works in two environments:
+      - Local/dev with a service-account key file: signs directly with the key.
+      - Cloud Run with ADC (no key in image): signs via the IAM signBlob API
+        using the runtime service account's access token. The runtime SA needs
+        roles/iam.serviceAccountTokenCreator on itself plus object access on the
+        bucket.
+    """
+    from datetime import timedelta
+    from google.oauth2 import service_account
+    from google.auth.transport import requests as grequests
+
+    blob = get_storage_client().bucket(GCS_UPLOAD_BUCKET).blob(blob_path)
+    creds = get_credentials()
+
+    # Service-account key file (has a private key) -> sign locally.
+    if isinstance(creds, service_account.Credentials):
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=minutes),
+            method="PUT",
+        )
+
+    # ADC (e.g. Cloud Run): sign through the IAM API with a fresh token.
+    creds.refresh(grequests.Request())
+    sa_email = getattr(creds, "service_account_email", None)
+    return blob.generate_signed_url(
+        version="v4",
+        expiration=timedelta(minutes=minutes),
+        method="PUT",
+        service_account_email=sa_email,
+        access_token=creds.token,
+    )
 
 
 def ensure_dataset_exists(dataset_name=None):
