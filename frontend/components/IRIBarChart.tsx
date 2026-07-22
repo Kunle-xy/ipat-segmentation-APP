@@ -48,11 +48,11 @@ export default function IRIBarChart({ segmentData, compact = false }: IRIBarChar
           />
           <Legend wrapperStyle={{ fontSize: 9 }} iconSize={8} />
           {hasLiri && (
-            <Bar dataKey="LIRI" fill="#10B981" name="LIRI" label={{ position: 'top', fontSize: 7, formatter: fmt }} />
+            <Bar dataKey="LIRI" fill="#10B981" name="LIRI" isAnimationActive={false} label={{ position: 'top', fontSize: 7, formatter: fmt }} />
           )}
-          <Bar dataKey="Avg IRI" fill="#3B82F6" name="Avg IRI" label={{ position: 'top', fontSize: 7, formatter: fmt }} />
+          <Bar dataKey="Avg IRI" fill="#3B82F6" name="Avg IRI" isAnimationActive={false} label={{ position: 'top', fontSize: 7, formatter: fmt }} />
           {hasRiri && (
-            <Bar dataKey="RIRI" fill="#F59E0B" name="RIRI" label={{ position: 'top', fontSize: 7, formatter: fmt }} />
+            <Bar dataKey="RIRI" fill="#F59E0B" name="RIRI" isAnimationActive={false} label={{ position: 'top', fontSize: 7, formatter: fmt }} />
           )}
         </BarChart>
       </div>
@@ -80,11 +80,11 @@ export default function IRIBarChart({ segmentData, compact = false }: IRIBarChar
         />
         <Legend wrapperStyle={{ fontSize: 11 }} />
         {hasLiri && (
-          <Bar dataKey="LIRI" fill="#10B981" name="LIRI" label={{ position: 'top', fontSize: 8, formatter: fmt }} />
+          <Bar dataKey="LIRI" fill="#10B981" name="LIRI" isAnimationActive={false} label={{ position: 'top', fontSize: 8, formatter: fmt }} />
         )}
-        <Bar dataKey="Avg IRI" fill="#3B82F6" name="Avg IRI" label={{ position: 'top', fontSize: 8, formatter: fmt }} />
+        <Bar dataKey="Avg IRI" fill="#3B82F6" name="Avg IRI" isAnimationActive={false} label={{ position: 'top', fontSize: 8, formatter: fmt }} />
         {hasRiri && (
-          <Bar dataKey="RIRI" fill="#F59E0B" name="RIRI" label={{ position: 'top', fontSize: 8, formatter: fmt }} />
+          <Bar dataKey="RIRI" fill="#F59E0B" name="RIRI" isAnimationActive={false} label={{ position: 'top', fontSize: 8, formatter: fmt }} />
         )}
       </BarChart>
       <p className="text-xs text-gray-400 mt-1 text-center">Higher IRI = worse condition</p>

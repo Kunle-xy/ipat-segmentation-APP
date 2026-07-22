@@ -249,8 +249,15 @@ export default function MapView({ selectedSegments }: MapViewProps) {
 
       const hasIriData = segment.iriData && segment.iriData.length > 0
 
-      const popupContent = `
-        <div style="font-family: system-ui, sans-serif; min-width: 210px;">
+      // Use a DOM element (not an HTML string) for the popup content. When the
+      // IRI chart is toggled on we render it into #iri-chart-* with React, then
+      // call popup.update() to resize the popup. Leaflet's update() re-applies
+      // string content via innerHTML (which would wipe the React-rendered chart
+      // and reset the container to display:none), but for an element it detaches
+      // and re-appends the SAME node, preserving the chart subtree inside it.
+      const popupEl = document.createElement('div')
+      popupEl.style.cssText = 'font-family: system-ui, sans-serif; min-width: 210px;'
+      popupEl.innerHTML = `
           <div style="font-weight: 600; font-size: 13px; color: #1e293b; margin-bottom: 2px;">${segment.route_name}</div>
           <div style="font-size: 11px; color: #64748b; line-height: 1.6;">
             Seg&nbsp;${segment.segment_id}&nbsp;&nbsp;·&nbsp;&nbsp;${segment.surftype || 'N/A'}&nbsp;&nbsp;·&nbsp;&nbsp;${(segment.length || 0).toFixed(0)}&nbsp;ft
@@ -271,10 +278,9 @@ export default function MapView({ selectedSegments }: MapViewProps) {
             </button>
           </div>
           ${hasIriData ? `<div id="iri-chart-${index}" style="display:none;margin-top:6px;border-top:1px solid #e2e8f0;padding-top:6px;"></div>` : ''}
-        </div>
       `
 
-      const popup = L.popup({ maxWidth: 290 }).setContent(popupContent)
+      const popup = L.popup({ maxWidth: 290 }).setContent(popupEl)
       polyline.bindPopup(popup)
 
       // Per-popup chart root (scoped to this polyline's closure)
@@ -290,6 +296,10 @@ export default function MapView({ selectedSegments }: MapViewProps) {
           const chartContainer = document.getElementById(`iri-chart-${index}`) as HTMLDivElement | null
 
           if (checkbox && chartContainer) {
+            // The popup content element is reused across open/close, so start
+            // each open from a clean, unchecked/hidden baseline.
+            checkbox.checked = false
+            chartContainer.style.display = 'none'
             const handleToggle = () => {
               if (checkbox.checked) {
                 chartContainer.style.display = 'block'

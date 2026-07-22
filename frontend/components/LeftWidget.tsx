@@ -89,6 +89,13 @@ function LeftWidget({
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
+  // Raw text for the distance input so partial entries like "0." or "0.0"
+  // can be typed without the numeric value fighting the keystrokes.
+  const [distanceText, setDistanceText] = useState(String(segmentDistance));
+  // Keep the text in sync when the numeric value changes elsewhere.
+  useEffect(() => {
+    setDistanceText(prev => (parseFloat(prev) === segmentDistance ? prev : String(segmentDistance)));
+  }, [segmentDistance]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -520,8 +527,21 @@ function LeftWidget({
                   min="0.01"
                   max="10"
                   step="0.01"
-                  value={segmentDistance}
-                  onChange={(e) => setSegmentDistance(parseFloat(e.target.value) || 0.1)}
+                  value={distanceText}
+                  onChange={(e) => {
+                    const text = e.target.value;
+                    setDistanceText(text);
+                    const n = parseFloat(text);
+                    if (!Number.isNaN(n)) setSegmentDistance(n);
+                  }}
+                  onBlur={() => {
+                    // Clamp to the allowed range only once editing is done.
+                    let n = parseFloat(distanceText);
+                    if (Number.isNaN(n)) n = 0.1;
+                    n = Math.min(10, Math.max(0.01, n));
+                    setSegmentDistance(n);
+                    setDistanceText(String(n));
+                  }}
                   disabled={loading}
                   className="w-full bg-slate-800 text-sm px-3 py-2 rounded-lg border border-slate-600 focus:outline-none focus:border-blue-500 disabled:opacity-50"
                 />
