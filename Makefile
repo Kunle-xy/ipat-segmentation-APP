@@ -263,8 +263,12 @@ deploy-setup:
 deploy-build:
 	@echo "$(BLUE)Building and pushing images...$(NC)"
 	@echo "Building backend..."
-	# --no-cache: the legacy Docker builder mis-caches --target production layers,
-	# shipping stale code. Force a clean rebuild until buildx/BuildKit is available.
+	# --no-cache alone is NOT enough: the legacy Docker builder can still reuse a
+	# poisoned build cache for --target production layers and ship stale code
+	# (observed shipping an old frontend bundle despite --no-cache). Prune the
+	# builder cache first to force a genuinely clean rebuild. Remove once buildx/
+	# BuildKit is available.
+	docker builder prune -f
 	docker build --no-cache -t $(AR_REPO)/ipat-backend:latest --target production ./backend
 	docker push $(AR_REPO)/ipat-backend:latest
 	@echo "Building frontend..."
