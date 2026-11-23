@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ID = os.getenv("GCP_PROJECT_ID", "vernal-citadel-479904-i2")
 DATASET_ID = os.getenv("GCP_DATASET_ID", "ipat_dataset")
 CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # GCS bucket used for direct browser uploads (bypasses Cloud Run's 32MB
 # request-body limit). Files are PUT straight to GCS via a signed URL, then

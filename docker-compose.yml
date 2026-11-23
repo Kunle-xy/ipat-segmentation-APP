@@ -1,15 +1,29 @@
 services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ipat
+      POSTGRES_USER: ipat
+      POSTGRES_PASSWORD: ipat
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ipat", "-d", "ipat"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - ipat-network
+
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: development
     container_name: ipat-backend
-    env_file:
-      - .env
     environment:
-      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
-      - GCP_DATASET_ID=${GCP_DATASET_ID:-ipat_dataset}
-      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/gcp-service-account.json}
+      - DATABASE_URL=postgresql://ipat:ipat@postgres:5432/ipat
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3010}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     ports:
@@ -17,14 +31,15 @@ services:
     volumes:
       # Mount backend code for development hot-reload
       - ./backend:/app
-      # Mount GCP credentials (ensure this file exists)
-      - ./backend/gcp-service-account.json:/app/gcp-service-account.json:ro
     command: >
       uvicorn main:app
       --host ${BACKEND_HOST:-0.0.0.0}
       --port 8010
       --reload
-      --log-level ${LOG_LEVEL:-info}
+      --log-level info
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
       interval: 30s
@@ -43,11 +58,10 @@ services:
       args:
         - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8010}
     container_name: ipat-frontend
-    env_file:
-      - .env
     environment:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8010}
-      - NODE_ENV=${NODE_ENV:-development}
+      - NEXT_PUBLIC_UPLOAD_MODE=direct
+      - NODE_ENV=development
     ports:
       - "${FRONTEND_PORT:-3010}:3010"
     volumes:
@@ -68,5 +82,5 @@ networks:
     driver: bridge
     name: ipat-network
 
-# Note: This setup uses Google BigQuery as the database
-# No local database container is needed
+volumes:
+  postgres-data:

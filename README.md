@@ -19,113 +19,119 @@ A web application for analyzing pavement distress data. Upload Excel files, segm
 |-------|------------|
 | Frontend | Next.js 14, React, TypeScript, Tailwind CSS |
 | Backend | FastAPI, Python 3.11 |
-| Database | Google Cloud BigQuery |
+| Database | PostgreSQL 16 for local development, BigQuery for production |
 | Deployment | Docker, Terraform |
 
 ---
 
-## Prerequisites
+## Local Development with PostgreSQL
 
-Before you start, make sure you have:
-
-- [ ] **Docker** installed ([Get Docker](https://docs.docker.com/get-docker/))
-- [ ] **GCP Service Account** with BigQuery access
-- [ ] Service account JSON file
-
----
-
-## Getting Started
-
-### Step 1: Clone and Navigate
+Install Docker with the Compose plugin and make sure your user can run `docker info`. From the repository root, run:
 
 ```bash
-cd /path/to/APP
+./start.sh start
 ```
 
-### Step 2: Set Up Environment
+The script creates `.env` from `.env.example` if needed. You can also use `make dev` or `docker compose up --build -d`. The default settings work without a GCP project, a key file, or Cloud Storage access. Docker needs registry access for the initial image build.
+
+Compose starts PostgreSQL 16 on its internal network, starts FastAPI after the database is ready, and starts Next.js after the API health check passes. The backend receives an internal `DATABASE_URL`. Next.js sends files to the API as multipart requests, and the API saves them in PostgreSQL. Each county gets an `ipat_<county>` schema, and re-uploading a file for a year replaces that year's raw table. Processing runs the segmentation query in PostgreSQL and saves the results and metadata for the browser.
+
+| Service | Default URL |
+|---------|-------------|
+| Frontend | http://localhost:3010 |
+| Backend API | http://localhost:8010 |
+| API documentation | http://localhost:8010/docs |
+
+Both app containers mount the source for live reload. To change the host ports, edit `FRONTEND_PORT` and `BACKEND_PORT` in `.env`. Set `CORS_ORIGINS` to include the browser's frontend origin and `NEXT_PUBLIC_API_URL` to the browser-reachable API URL. If your existing `.env` came from a production setup, check these values before starting locally.
 
 ```bash
-# Copy the example environment file
-cp .env.example .env
+docker compose ps
+docker compose logs -f backend postgres
+docker compose down
 ```
 
-Edit `.env` with your GCP details:
-```env
-GCP_PROJECT_ID=your-project-id
-GCP_DATASET_ID=ipat_dataset
-```
+The `postgres-data` volume keeps local uploads and results across restarts and `docker compose down`. To reset local data completely, run `docker compose down -v`. Local PostgreSQL starts empty. To develop with a representative county, upload its source files for at least two years.
 
-### Step 3: Add GCP Credentials
+### PostgreSQL integration tests
 
-Place your service account JSON file here:
+With the backend Python dependencies installed, point the API integration tests at a disposable PostgreSQL database:
+
 ```bash
-cp /path/to/your-credentials.json backend/gcp-service-account.json
+IPAT_TEST_DATABASE_URL='postgresql://user:password@localhost:5432/ipat_test' \
+  python -m pytest backend/tests/test_postgres_integration.py
 ```
 
-### Step 4: Start the Application
+The tests create and clear temporary county schemas. They exercise CSV and Excel upload, both segmentation modes, and result retrieval.
 
-You have **three options** to start the app:
+## Production with BigQuery
 
-#### Option A: Interactive Start Script (Recommended for beginners)
+Production still uses BigQuery for ingestion, segmentation, and results. The browser uses signed Cloud Storage upload URLs, then asks the API to ingest the staged files. Use a GCP project with BigQuery enabled and configure the upload bucket with the permissions and browser CORS rules required by that flow.
+
+### Single Docker host
+
+Copy `.env.example` to `.env` if needed. Set these values for your deployment:
+
+- `GCP_PROJECT_ID` selects the GCP project. The backend creates and uses county-specific BigQuery datasets in that project.
+- `GOOGLE_APPLICATION_CREDENTIALS` points to the mounted key at `/app/gcp-service-account.json`. Place the key at `backend/gcp-service-account.json` on the host and make it readable by the backend container.
+- `GCS_UPLOAD_BUCKET` selects the upload bucket. The default is `ipat-uploads-<project-id>`.
+- `NEXT_PUBLIC_API_URL` points to the public API URL. Next.js embeds it at build time, so rebuild the frontend if the URL changes.
+- `CORS_ORIGINS` lists the frontend origins that may call the API.
+
+Stop the local stack before starting production on the same host ports. Then run:
+
 ```bash
-./start.sh
-```
-This opens an interactive menu where you can:
-- Start/stop services
-- View logs
-- Check status
-- And more...
-
-**Tip:** Press `Ctrl+C` to exit log view, then `Enter` to return to menu.
-
-#### Option B: Make Commands (Quick and easy)
-```bash
-make dev      # Start in development mode
-make down     # Stop all services
-make logs     # View logs
-make help     # See all commands
+./start.sh start-prod
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs -f
 ```
 
-#### Option C: Docker Compose Directly
-```bash
-docker compose up --build -d    # Start
-docker compose down             # Stop
-docker compose logs -f          # View logs
+Use `make prod-down` to stop it. Compose builds standalone Next.js and multi-worker FastAPI images. To deploy source changes, rebuild and recreate the services with `make prod`. See [DEPLOYMENT.md](DEPLOYMENT.md) for reverse proxy and HTTPS setup.
+
+### Google Cloud Run
+
+Use the deployment targets in the [Makefile](Makefile) from a machine authenticated to GCP with `gcloud` and Docker. Configure `GCP_PROJECT`, `GCP_REGION`, and the Artifact Registry repository for your environment. The Cloud Run backend identity needs permission to run BigQuery jobs and manage the app's datasets, access staged objects in the upload bucket, and sign upload URLs through IAM.
+
+`make deploy` configures Artifact Registry, builds and pushes the production images, deploys the backend, rebuilds and deploys the frontend with the backend URL, and updates backend CORS. These targets send traffic to the latest service revisions. Check service URLs and revision status with `make deploy-status`. Terraform definitions for the GCP infrastructure are under [terraform/](terraform/).
+
+## Data Requirements
+
+These requirements apply to both local and production uploads.
+
+- Use **Excel (`.xlsx`) or CSV (`.csv`)** with the column names in the first row. Save legacy `.xls` files as `.xlsx` before uploading.
+- Prepare one file per county per year and select the county when uploading. Put the four-digit year in each filename, such as `distress_2020.xlsx` or `distress_2021.csv`. Keep other digits out of the filename because the uploader joins all filename digits to read the year.
+- Upload data for **at least two years** for the same county. Use consistent route identifiers and mileposts across years. A segment needs overlapping route coverage and usable IRI data in every selected year to appear in the results.
+
+### Required columns
+
+| Column | What to provide |
+|---------|-----------------|
+| `ROUTE_NAME` | Road name or code, such as `US-30`. |
+| `FROM_MEASURE`, `TO_MEASURE` | Numeric start and end mileposts in miles. Use a positive-length interval. |
+| `BEGIN_GLAT`, `BEGIN_GLON` | Numeric start latitude and longitude in decimal degrees. |
+| `END_GLAT`, `END_GLON` | Numeric end latitude and longitude in decimal degrees. |
+| `IRI` | Numeric International Roughness Index. Use consistent units across years. For Excel and direct API uploads, the backend can derive IRI when both `LIRI` and `RIRI` columns are present. The browser's CSV validator requires the `IRI` header. |
+| `COUNTY_ID` | Numeric county identifier from the source data. |
+| `SURFTYPE` | Surface type code or label, such as `AC` or `PCC`. |
+
+Include a stable **`ROUTE_ID`** such as `M141541470N` in every year file when available. The browser requires this column for CSV uploads. The segmentation engine matches on `ROUTE_ID` when every selected file contains the column. Otherwise, it matches on `ROUTE_NAME`. `FCLASS` and `WIDTH` are optional.
+
+Example row for `distress_2020.csv`:
+
+```csv
+ROUTE_ID,ROUTE_NAME,FROM_MEASURE,TO_MEASURE,BEGIN_GLAT,BEGIN_GLON,END_GLAT,END_GLON,IRI,COUNTY_ID,SURFTYPE
+M141541470N,US-30,10.00,10.10,41.5000,-93.5000,41.5010,-93.4990,85.0,77,AC
 ```
-
----
-
-## Access the Application
-
-Once running, open your browser:
-
-| Service | URL |
-|---------|-----|
-| **Frontend** | http://localhost:3010 |
-| **Backend API** | http://localhost:8010 |
-| **API Documentation** | http://localhost:8010/docs |
-
----
 
 ## How to Use
 
-### 1. Prepare Your Data
-
-Your Excel files must:
-- Have the **year in the filename** (e.g., `2020.xlsx`, `data_2021.xlsx`)
-- Include these columns:
-  - `ROUTE_NAME`, `FROM_MEASURE`, `TO_MEASURE`
-  - `BEGIN_GLAT`, `BEGIN_GLON`, `END_GLAT`, `END_GLON`
-  - `IRI`, `COUNTY_ID`, `SURFTYPE`, `FCLASS`, `WIDTH`
-
-### 2. Upload Files
+### 1. Upload Files
 
 1. Go to http://localhost:3010
-2. Click **"Select Excel Files"**
-3. Choose 2+ years of data files
+2. Select the county and open the file picker
+3. Choose files for at least two years
 4. Click **"Upload Files"**
 
-### 3. Run Analysis
+### 2. Run Analysis
 
 1. Set number of segments (1-100)
 2. Click **"Run Segmentation"**
@@ -170,7 +176,7 @@ APP/
 │   ├── main.py             # API endpoints
 │   ├── requirements.txt    # Python dependencies
 │   ├── Dockerfile          # Backend container config
-│   └── gcp-service-account.json  # Your GCP credentials
+│   └── postgres.py         # Local PostgreSQL storage
 │
 ├── frontend/               # Next.js React app
 │   ├── app/               # Pages
@@ -190,91 +196,18 @@ APP/
 
 ---
 
-## Environment Variables
-
-Create a `.env` file with these settings:
-
-### Required
-```env
-GCP_PROJECT_ID=your-gcp-project-id
-GCP_DATASET_ID=ipat_dataset
-GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-service-account.json
-```
-
-### Optional
-```env
-BACKEND_PORT=8010          # Default: 8010
-FRONTEND_PORT=3010         # Default: 3010
-LOG_LEVEL=info             # Options: debug, info, warning, error
-NODE_ENV=development       # Options: development, production
-```
-
----
-
 ## Troubleshooting
 
-### "Container is unhealthy"
-
-Check the logs:
-```bash
-docker logs ipat-backend
-docker logs ipat-frontend
-```
-
-### "Cannot connect to localhost:3010"
-
-1. Check if containers are running:
-   ```bash
-   docker compose ps
-   ```
-
-2. If frontend is restarting, check logs:
-   ```bash
-   docker logs ipat-frontend
-   ```
-
-### "BigQuery connection failed"
-
-1. Verify credentials file exists:
-   ```bash
-   ls -la backend/gcp-service-account.json
-   ```
-
-2. Check GCP project ID in `.env`
-
-### "Port already in use"
-
-Find what's using the port:
-```bash
-lsof -i :8010  # Backend port
-lsof -i :3010  # Frontend port
-```
-
-Then either stop that process or change ports in `.env`.
-
----
-
-## Development vs Production
-
-| Aspect | Development (`docker-compose.yml`) | Production (`docker-compose.prod.yml`) |
-|--------|-----------------------------------|----------------------------------------|
-| Hot reload | ✅ Yes | ❌ No |
-| Code mounting | ✅ Local files mounted | ❌ Built into image |
-| Logging | Verbose (info) | Minimal (warning) |
-| Performance | Slower | Optimized |
-
-**Start production:**
-```bash
-docker compose -f docker-compose.prod.yml up --build -d
-```
-
----
+- If Docker reports a socket permission error, check that your user has access to the daemon.
+- If local containers are unhealthy, run `docker compose ps` and `docker compose logs backend postgres`.
+- If the browser cannot reach the API, check the API URL, host port, and CORS origin in `.env`.
+- If production cannot reach BigQuery, check the project and runtime identity. Inspect the `/health` response body for BigQuery connection errors.
 
 ## API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/health` | Check BigQuery connection |
+| GET | `/health` | Check the configured database connection |
 | POST | `/upload` | Upload Excel files |
 | POST | `/process?num_segments=20` | Run segmentation |
 | GET | `/results?limit=1000` | Get results |

@@ -1,5 +1,7 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+
+import postgres
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_bigquery_client, PROJECT_ID
@@ -30,11 +32,19 @@ app.include_router(counties_router)
 
 @app.get("/")
 def read_root():
-    return {"message": "IPAT Segmentation Analysis API (BigQuery)", "status": "running"}
+    return {"message": "IPAT Segmentation Analysis API", "status": "running"}
 
 
 @app.get("/health")
 def health_check():
+    if postgres.DATABASE_URL:
+        try:
+            with postgres.connect() as connection:
+                connection.execute("SELECT 1")
+        except Exception:
+            raise HTTPException(status_code=503, detail="PostgreSQL unavailable")
+        return {"result": "OK", "status": "healthy", "postgres": "connected"}
+
     try:
         query = "SELECT 1"
         get_bigquery_client().query(query).result()

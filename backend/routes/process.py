@@ -1,6 +1,11 @@
-from fastapi import APIRouter, HTTPException
-import re
+from contextlib import nullcontext
 import logging
+import math
+import re
+
+from fastapi import APIRouter, HTTPException
+
+import postgres
 
 from config import PROJECT_ID, get_bigquery_client
 
@@ -21,20 +26,37 @@ def _route_key_expr(has_route_id):
     return "ROUTE_NAME"
 
 
-def _build_union(tables, county_dataset, table_cols, has_route_id, has_liri, has_riri):
+def _table(dataset, table, local):
+    return postgres.table_ref(dataset, table) if local else f"`{PROJECT_ID}.{dataset}.{table}`"
+
+
+def _replace_table(dataset, table, local):
+    if local:
+        return postgres.replace_table(dataset, table)
+    return f"CREATE OR REPLACE TABLE {_table(dataset, table, local)} AS"
+
+
+def _segment_series(end, local):
+    if local:
+        return f"generate_series(1, {end}) AS segments(segment_id)"
+    return f"UNNEST(GENERATE_ARRAY(1, {end})) AS segment_id"
+
+
+def _build_union(tables, county_dataset, table_cols, has_route_id, has_liri, has_riri, local=False):
     """Build the UNION ALL body that stacks all raw_distress_{year} tables.
 
     Carries ROUTE_ID (as route_key), ROUTE_NAME, measures, coordinates, and
     IRI/LIRI/RIRI through. LIRI/RIRI are emitted as NULL for any year table
     that lacks them so the UNION stays type-consistent.
     """
+    float_type = "double precision" if local else "FLOAT64"
     route_key_expr = _route_key_expr(has_route_id)
     union_parts = []
     for table in tables:
         year = re.sub(r'[^0-9]', '', table.replace('raw_distress_', ''))
         cols = table_cols.get(table, set())
-        liri_expr = "LIRI" if (has_liri and "LIRI" in cols) else "CAST(NULL AS FLOAT64)"
-        riri_expr = "RIRI" if (has_riri and "RIRI" in cols) else "CAST(NULL AS FLOAT64)"
+        liri_expr = "LIRI" if (has_liri and "LIRI" in cols) else f"CAST(NULL AS {float_type})"
+        riri_expr = "RIRI" if (has_riri and "RIRI" in cols) else f"CAST(NULL AS {float_type})"
         union_parts.append(f"""
             SELECT {route_key_expr} AS route_key,
                    ROUTE_NAME,
@@ -43,7 +65,7 @@ def _build_union(tables, county_dataset, table_cols, has_route_id, has_liri, has
                    IRI, {liri_expr} AS LIRI, {riri_expr} AS RIRI,
                    COUNTY_ID, SURFTYPE,
                    {year} AS data_year
-            FROM `{PROJECT_ID}.{county_dataset}.{table}`
+            FROM {_table(county_dataset, table, local)}
             WHERE {route_key_expr} IS NOT NULL
               AND ROUTE_NAME IS NOT NULL
               AND FROM_MEASURE IS NOT NULL
@@ -56,9 +78,10 @@ def _build_union(tables, county_dataset, table_cols, has_route_id, has_liri, has
     return ' UNION ALL '.join(union_parts)
 
 
-def _build_fixed_segment_cte(num_segments):
+def _build_fixed_segment_cte(num_segments, local=False):
     """segment_definitions for fixed-count segmentation: N equal divisions of
     the overlap window [route_min, route_max]."""
+    series = _segment_series(num_segments, local)
     return f"""
         segment_definitions AS (
             SELECT rb.route_key,
@@ -66,12 +89,12 @@ def _build_fixed_segment_cte(num_segments):
                    rb.route_min + ((segment_id - 1) * (rb.route_max - rb.route_min) / {num_segments}) AS segment_start,
                    rb.route_min + (segment_id * (rb.route_max - rb.route_min) / {num_segments}) AS segment_end
             FROM route_bounds rb
-            CROSS JOIN UNNEST(GENERATE_ARRAY(1, {num_segments})) AS segment_id
+            CROSS JOIN {series}
             WHERE rb.route_key IN (SELECT route_key FROM valid_routes_with_overlap)
         )"""
 
 
-def _build_distance_segment_cte(segment_distance):
+def _build_distance_segment_cte(segment_distance, local=False):
     """segment_definitions for distance-based segmentation.
 
     Mirrors the prototype's `while start < earlyFinish: end = start + segment`
@@ -79,10 +102,12 @@ def _build_distance_segment_cte(segment_distance):
     CEIL(...) segments so the final window covers the tail (uncapped end, like
     the prototype's last iteration).
     """
+    series = _segment_series("rsc.num_segments", local)
+    int_type = "bigint" if local else "INT64"
     return f"""
         route_segment_counts AS (
             SELECT route_key, route_min, route_max,
-                   GREATEST(CAST(CEIL((route_max - route_min) / {segment_distance}) AS INT64), 1) AS num_segments
+                   GREATEST(CAST(CEIL((route_max - route_min) / {segment_distance}) AS {int_type}), 1) AS num_segments
             FROM route_bounds
             WHERE route_key IN (SELECT route_key FROM valid_routes_with_overlap)
         ),
@@ -92,13 +117,13 @@ def _build_distance_segment_cte(segment_distance):
                    rsc.route_min + ((segment_id - 1) * {segment_distance}) AS segment_start,
                    rsc.route_min + (segment_id * {segment_distance}) AS segment_end
             FROM route_segment_counts rsc
-            CROSS JOIN UNNEST(GENERATE_ARRAY(1, rsc.num_segments)) AS segment_id
+            CROSS JOIN {series}
         )"""
 
 
 def _build_combined_query(county_dataset, years, segment_definitions_cte,
                           segmentation_type, metadata_value, years_list,
-                          num_years, has_route_id, has_liri, has_riri):
+                          num_years, has_route_id, has_liri, has_riri, local=False):
     """Build the segmentation pipeline that produces distress_final.
 
     Logic mirrors the pandas prototype:
@@ -111,7 +136,7 @@ def _build_combined_query(county_dataset, years, segment_definitions_cte,
     """
 
     # valid_routes: routes present in at least 2 of the selected years
-    year_columns = [f"MAX(IF(data_year = {y}, 1, 0)) AS y{y}" for y in years]
+    year_columns = [f"MAX(CASE WHEN data_year = {y} THEN 1 ELSE 0 END) AS y{y}" for y in years]
     year_conditions = []
     for i in range(len(years)):
         for j in range(i + 1, len(years)):
@@ -125,13 +150,13 @@ def _build_combined_query(county_dataset, years, segment_definitions_cte,
             year_conditions.append("(" + " AND ".join(condition_parts) + ")")
 
     # Per-year pivot expressions (aggregated per route_key + segment + year already)
-    iri_pivot = [f"MAX(IF(data_year = {y}, year_iri, NULL)) AS iri_{y}" for y in years]
-    index_pivot = [f"MAX(IF(data_year = {y}, row_indices, NULL)) AS index_{y}" for y in years]
+    iri_pivot = [f"MAX(CASE WHEN data_year = {y} THEN year_iri END) AS iri_{y}" for y in years]
+    index_pivot = [f"MAX(CASE WHEN data_year = {y} THEN row_indices END) AS index_{y}" for y in years]
     pivot_cols = list(iri_pivot)
     if has_liri:
-        pivot_cols += [f"MAX(IF(data_year = {y}, year_liri, NULL)) AS liri_{y}" for y in years]
+        pivot_cols += [f"MAX(CASE WHEN data_year = {y} THEN year_liri END) AS liri_{y}" for y in years]
     if has_riri:
-        pivot_cols += [f"MAX(IF(data_year = {y}, year_riri, NULL)) AS riri_{y}" for y in years]
+        pivot_cols += [f"MAX(CASE WHEN data_year = {y} THEN year_riri END) AS riri_{y}" for y in years]
     pivot_cols += index_pivot
 
     null_checks = ' AND '.join([f"p.iri_{y} IS NOT NULL" for y in years])
@@ -149,24 +174,36 @@ def _build_combined_query(county_dataset, years, segment_definitions_cte,
 
     route_id_select = "g.route_key AS ROUTE_ID,\n           " if has_route_id else ""
 
+    def endpoint(column, order):
+        if local:
+            return f"(ARRAY_AGG({column} ORDER BY {order}))[1]"
+        return f"ARRAY_AGG({column} ORDER BY {order} LIMIT 1)[OFFSET(0)]"
+
+    all_years = _table(county_dataset, "all_years", local)
+    text_type = "text" if local else "STRING"
+    float_type = "double precision" if local else "FLOAT64"
+    length = "(g.to_measure - g.from_measure) * 5280"
+    rounded_length = f"ROUND(CAST({length} AS numeric), 2)" if local else f"ROUND({length}, 2)"
+    timestamp = "CURRENT_TIMESTAMP" if local else "CURRENT_TIMESTAMP()"
+
     return f"""
     -- Combined pipeline: overlap window -> segment claim -> coords/IRI -> pivot
-    CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.distress_final` AS
+    {_replace_table(county_dataset, "distress_final", local)}
     WITH valid_routes AS (
         SELECT route_key
         FROM (
             SELECT route_key,
                    {', '.join(year_columns)}
-            FROM `{PROJECT_ID}.{county_dataset}.all_years`
+            FROM {all_years}
             GROUP BY route_key
-        )
+        ) AS route_years
         WHERE {' OR '.join(year_conditions)}
     ),
     year_bounds AS (
         SELECT route_key, data_year,
                MIN(FROM_MEASURE) AS year_min,
                MAX(TO_MEASURE) AS year_max
-        FROM `{PROJECT_ID}.{county_dataset}.all_years`
+        FROM {all_years}
         WHERE route_key IN (SELECT route_key FROM valid_routes)
         GROUP BY route_key, data_year
     ),
@@ -195,7 +232,7 @@ def _build_combined_query(county_dataset, years, segment_definitions_cte,
     all_years_with_index AS (
         SELECT *,
                ROW_NUMBER() OVER (PARTITION BY route_key, data_year ORDER BY FROM_MEASURE) - 1 AS row_index
-        FROM `{PROJECT_ID}.{county_dataset}.all_years`
+        FROM {all_years}
         WHERE route_key IN (SELECT route_key FROM valid_routes_with_overlap)
     ),
     -- Claim each record into every segment it OVERLAPS, then keep only the
@@ -217,7 +254,7 @@ def _build_combined_query(county_dataset, years, segment_definitions_cte,
           AND d.TO_MEASURE > sd.segment_start
     ),
     data_with_segments AS (
-        SELECT * EXCEPT(segment_rank)
+        SELECT *
         FROM data_with_segments_all_matches
         WHERE segment_rank = 1
     ),
@@ -228,7 +265,7 @@ def _build_combined_query(county_dataset, years, segment_definitions_cte,
                AVG(LIRI) AS year_liri,
                AVG(RIRI) AS year_riri,
                COUNT(*) AS record_count,
-               STRING_AGG(CAST(row_index AS STRING), ',' ORDER BY row_index) AS row_indices
+               STRING_AGG(CAST(row_index AS {text_type}), ',' ORDER BY row_index) AS row_indices
         FROM data_with_segments
         GROUP BY route_key, segment_id, data_year
     ),
@@ -248,16 +285,16 @@ def _build_combined_query(county_dataset, years, segment_definitions_cte,
                MIN(FROM_MEASURE) AS from_measure,
                MAX(TO_MEASURE) AS to_measure,
                COUNT(DISTINCT data_year) AS years_count,
-               ARRAY_AGG(BEGIN_GLAT ORDER BY FROM_MEASURE LIMIT 1)[OFFSET(0)] AS from_lat,
-               ARRAY_AGG(BEGIN_GLON ORDER BY FROM_MEASURE LIMIT 1)[OFFSET(0)] AS from_lon,
-               ARRAY_AGG(END_GLAT ORDER BY TO_MEASURE DESC LIMIT 1)[OFFSET(0)] AS to_lat,
-               ARRAY_AGG(END_GLON ORDER BY TO_MEASURE DESC LIMIT 1)[OFFSET(0)] AS to_lon
+               {endpoint("BEGIN_GLAT", "FROM_MEASURE")} AS from_lat,
+               {endpoint("BEGIN_GLON", "FROM_MEASURE")} AS from_lon,
+               {endpoint("END_GLAT", "TO_MEASURE DESC")} AS to_lat,
+               {endpoint("END_GLON", "TO_MEASURE DESC")} AS to_lon
         FROM data_with_segments
         GROUP BY route_key, segment_id
     )
     SELECT {route_id_select}g.ROUTE_NAME, g.segment_id,
            g.from_measure, g.to_measure,
-           ROUND((g.to_measure - g.from_measure) * 5280, 2) AS length_ft,
+           {rounded_length} AS length_ft,
            g.from_lat, g.from_lon, g.to_lat, g.to_lon,
            g.county_id, g.surftype,
            g.years_count,
@@ -271,12 +308,12 @@ def _build_combined_query(county_dataset, years, segment_definitions_cte,
     ORDER BY g.route_key, g.segment_id;
 
     -- Store metadata in same script execution
-    CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.segmentation_metadata` AS
+    {_replace_table(county_dataset, "segmentation_metadata", local)}
     SELECT
         '{segmentation_type}' AS segmentation_type,
-        CAST({metadata_value} AS FLOAT64) AS segmentation_value,
+        CAST({metadata_value} AS {float_type}) AS segmentation_value,
         '{years_list}' AS processed_years,
-        CURRENT_TIMESTAMP() AS created_at;
+        {timestamp} AS created_at;
     """
 
 
@@ -321,7 +358,7 @@ def process_data(
                     detail="Maximum number of segments is 100."
                 )
         else:  # distance
-            if segment_distance <= 0:
+            if not math.isfinite(segment_distance) or segment_distance <= 0:
                 raise HTTPException(
                     status_code=400,
                     detail="Segment distance must be greater than 0 miles"
@@ -349,122 +386,143 @@ def process_data(
 
         # Create county-specific dataset name
         county_dataset = f"ipat_{county}"
-        client = get_bigquery_client()
+        local = bool(postgres.DATABASE_URL)
+        with postgres.connect() if local else nullcontext() as connection:
+            if local:
+                postgres.lock_county(connection, county_dataset)
+                def query_rows(sql):
+                    return connection.execute(sql).fetchall()
 
-        # Get list of available years from tables for this county
-        query = f"""
-        SELECT table_name
-        FROM `{PROJECT_ID}.{county_dataset}.INFORMATION_SCHEMA.TABLES`
-        WHERE table_name LIKE 'raw_distress_%'
-        ORDER BY table_name
-        """
+                execute = connection.execute
+            else:
+                client = get_bigquery_client()
+                def query_rows(sql):
+                    return client.query(sql).result()
 
-        tables_result = client.query(query).result()
-        all_tables = [row.table_name for row in tables_result]
+                execute = query_rows
 
-        # Filter tables based on selected years if provided
-        if selected_years:
-            selected_year_list = [y.strip() for y in selected_years.split(',')]
-            tables = [t for t in all_tables if any(t == f"raw_distress_{year}" for year in selected_year_list)]
-            logger.info(f"Filtering to selected years: {selected_year_list}, tables: {tables}")
-        else:
-            tables = all_tables
-            logger.info(f"Processing all available tables: {tables}")
+            # Get list of available years from tables for this county
+            query = f"""
+            SELECT table_name
+            FROM `{PROJECT_ID}.{county_dataset}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_name LIKE 'raw_distress_%'
+            ORDER BY table_name
+            """
 
-        if len(tables) < 2:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Need at least 2 years of data for {county_name}. Found: {len(tables)} (selected: {selected_years if selected_years else 'all'})"
+            tables_result = postgres.tables(connection, county_dataset) if local else query_rows(query)
+            all_tables = [
+                row["table_name"] for row in tables_result
+                if re.fullmatch(r"raw_distress_[0-9]+", row["table_name"])
+            ]
+
+            # Filter tables based on selected years if provided
+            if selected_years:
+                selected_year_list = [y.strip() for y in selected_years.split(',')]
+                tables = [t for t in all_tables if any(t == f"raw_distress_{year}" for year in selected_year_list)]
+                logger.info(f"Filtering to selected years: {selected_year_list}, tables: {tables}")
+            else:
+                tables = all_tables
+                logger.info(f"Processing all available tables: {tables}")
+
+            if len(tables) < 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Need at least 2 years of data for {county_name}. Found: {len(tables)} (selected: {selected_years if selected_years else 'all'})"
+                )
+
+            # Extract years from table names
+            years = [re.sub(r'[^0-9]', '', table.replace('raw_distress_', '')) for table in tables]
+            years_list = ', '.join(years)
+            num_years = len(years)
+
+            # Inspect raw table columns to detect ROUTE_ID / LIRI / RIRI availability
+            table_list_sql = ', '.join([f"'{t}'" for t in tables])
+            cols_query = f"""
+            SELECT table_name, column_name
+            FROM `{PROJECT_ID}.{county_dataset}.INFORMATION_SCHEMA.COLUMNS`
+            WHERE table_name IN ({table_list_sql})
+            """
+            table_cols = {}
+            column_rows = postgres.columns(connection, county_dataset) if local else query_rows(cols_query)
+            for row in column_rows:
+                if row["table_name"] in tables:
+                    table_cols.setdefault(row["table_name"], set()).add(row["column_name"].upper())
+
+            # ROUTE_ID is the unique key only if present in EVERY selected year table.
+            has_route_id = all('ROUTE_ID' in table_cols.get(t, set()) for t in tables)
+            has_liri = any('LIRI' in cols for cols in table_cols.values())
+            has_riri = any('RIRI' in cols for cols in table_cols.values())
+
+            key_label = 'ROUTE_ID' if has_route_id else 'ROUTE_NAME'
+            logger.info(f"Pipeline starting: {num_years} years for {county_name} ({years_list}), "
+                        f"type={segmentation_type}, key={key_label}, liri={has_liri}, riri={has_riri}")
+
+            # === QUERY 1: Build all_years table (UNION ALL raw tables) ===
+            union_body = _build_union(tables, county_dataset, table_cols,
+                                      has_route_id, has_liri, has_riri, local)
+            combined_query = f"""
+            {_replace_table(county_dataset, "all_years", local)}
+            {union_body}
+            """
+            logger.info(f"Query 1/3: Creating all_years table")
+            execute(combined_query)
+
+            # === QUERY 2: Combined pipeline (overlap -> segment -> coords/IRI -> pivot) ===
+            if segmentation_type == "fixed":
+                segment_cte = _build_fixed_segment_cte(num_segments, local)
+            else:
+                segment_cte = _build_distance_segment_cte(segment_distance, local)
+
+            metadata_value = num_segments if segmentation_type == "fixed" else segment_distance
+
+            combined_pipeline = _build_combined_query(
+                county_dataset, years, segment_cte,
+                segmentation_type, metadata_value, years_list,
+                num_years, has_route_id, has_liri, has_riri, local
             )
+            logger.info(f"Query 2/3: Running combined segmentation pipeline")
+            execute(combined_pipeline)
 
-        # Extract years from table names
-        years = [re.sub(r'[^0-9]', '', table.replace('raw_distress_', '')) for table in tables]
-        years_list = ', '.join(years)
-        num_years = len(years)
+            # === QUERY 3: Get final statistics ===
+            distinct_route = "ROUTE_ID" if has_route_id else "ROUTE_NAME"
+            stats_type = "bigint" if local else "INT64"
+            stats_query = f"""
+            SELECT
+                COUNT(*) AS total_rows,
+                COUNT(DISTINCT {distinct_route}) AS unique_routes,
+                CAST(COUNT(*) * 1.0 / GREATEST({num_segments}, 1) AS {stats_type}) AS expected_routes
+            FROM {_table(county_dataset, "distress_final", local)}
+            """
+            logger.info(f"Query 3/3: Getting statistics")
+            stats = list(query_rows(stats_query))[0]
 
-        # Inspect raw table columns to detect ROUTE_ID / LIRI / RIRI availability
-        table_list_sql = ', '.join([f"'{t}'" for t in tables])
-        cols_query = f"""
-        SELECT table_name, column_name
-        FROM `{PROJECT_ID}.{county_dataset}.INFORMATION_SCHEMA.COLUMNS`
-        WHERE table_name IN ({table_list_sql})
-        """
-        table_cols = {}
-        for row in client.query(cols_query).result():
-            table_cols.setdefault(row.table_name, set()).add(row.column_name.upper())
+            logger.info(f"DONE: Routes={stats['unique_routes']}, Segments={stats['total_rows']}")
 
-        # ROUTE_ID is the unique key only if present in EVERY selected year table.
-        has_route_id = all('ROUTE_ID' in table_cols.get(t, set()) for t in tables)
-        has_liri = any('LIRI' in cols for cols in table_cols.values())
-        has_riri = any('RIRI' in cols for cols in table_cols.values())
-
-        key_label = 'ROUTE_ID' if has_route_id else 'ROUTE_NAME'
-        logger.info(f"Pipeline starting: {num_years} years for {county_name} ({years_list}), "
-                    f"type={segmentation_type}, key={key_label}, liri={has_liri}, riri={has_riri}")
-
-        # === QUERY 1: Build all_years table (UNION ALL raw tables) ===
-        union_body = _build_union(tables, county_dataset, table_cols,
-                                  has_route_id, has_liri, has_riri)
-        combined_query = f"""
-        CREATE OR REPLACE TABLE `{PROJECT_ID}.{county_dataset}.all_years` AS
-        {union_body}
-        """
-        logger.info(f"Query 1/3: Creating all_years table")
-        client.query(combined_query).result()
-
-        # === QUERY 2: Combined pipeline (overlap -> segment -> coords/IRI -> pivot) ===
-        if segmentation_type == "fixed":
-            segment_cte = _build_fixed_segment_cte(num_segments)
-        else:
-            segment_cte = _build_distance_segment_cte(segment_distance)
-
-        metadata_value = num_segments if segmentation_type == "fixed" else segment_distance
-
-        combined_pipeline = _build_combined_query(
-            county_dataset, years, segment_cte,
-            segmentation_type, metadata_value, years_list,
-            num_years, has_route_id, has_liri, has_riri
-        )
-        logger.info(f"Query 2/3: Running combined segmentation pipeline")
-        client.query(combined_pipeline).result()
-
-        # === QUERY 3: Get final statistics ===
-        distinct_route = "ROUTE_ID" if has_route_id else "ROUTE_NAME"
-        stats_query = f"""
-        SELECT
-            COUNT(*) AS total_rows,
-            COUNT(DISTINCT {distinct_route}) AS unique_routes,
-            CAST(COUNT(*) / GREATEST({num_segments}, 1) AS INT64) AS expected_routes
-        FROM `{PROJECT_ID}.{county_dataset}.distress_final`
-        """
-        logger.info(f"Query 3/3: Getting statistics")
-        stats = list(client.query(stats_query).result())[0]
-
-        logger.info(f"DONE: Routes={stats.unique_routes}, Segments={stats.total_rows}")
-
-        result_data = {
-            "status": "success",
-            "message": f"Success! Processed {len(years)} years for {county_name}: {years_list}",
-            "county": county_name,
-            "dataset": county_dataset,
-            "segmentation_type": segmentation_type,
-            "years_processed": years_list,
-            "routes_processed": stats.unique_routes,
-            "segments_created": stats.total_rows,
-            "statistics": {
-                "total_rows": stats.total_rows,
-                "unique_routes": stats.unique_routes,
-                "expected_routes": stats.expected_routes
+            result_data = {
+                "status": "success",
+                "message": f"Success! Processed {len(years)} years for {county_name}: {years_list}",
+                "county": county_name,
+                "dataset": county_dataset,
+                "segmentation_type": segmentation_type,
+                "years_processed": years_list,
+                "routes_processed": stats['unique_routes'],
+                "segments_created": stats['total_rows'],
+                "statistics": {
+                    "total_rows": stats['total_rows'],
+                    "unique_routes": stats['unique_routes'],
+                    "expected_routes": stats['expected_routes']
+                }
             }
-        }
 
-        if segmentation_type == "fixed":
-            result_data["num_segments"] = num_segments
-        else:
-            result_data["segment_distance"] = segment_distance
+            if segmentation_type == "fixed":
+                result_data["num_segments"] = num_segments
+            else:
+                result_data["segment_distance"] = segment_distance
 
-        return result_data
+            return result_data
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -2,6 +2,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from typing import List
 import pandas as pd
 import pandas_gbq
+import postgres
 import io
 import re
 import time
@@ -41,15 +42,14 @@ def _read_dataframe(contents: bytes, filename: str) -> pd.DataFrame:
     return pd.read_excel(io.BytesIO(contents), engine='openpyxl')
 
 
-def _process_dataframe_to_bq(df: pd.DataFrame, filename: str, county_name: str):
-    """Clean a raw distress DataFrame and load it into BigQuery.
+def _process_dataframe(df: pd.DataFrame, filename: str, county_name: str):
+    """Clean a raw distress DataFrame and load it into the configured database.
 
     Shared by the legacy multipart /upload path and the GCS-backed /ingest path.
     Returns the per-file result dict.
     """
     county = _sanitize_county(county_name)
     county_dataset = f"ipat_{county}"
-    ensure_dataset_exists(county_dataset)
 
     year = _extract_year(filename)
     if not year:
@@ -57,16 +57,6 @@ def _process_dataframe_to_bq(df: pd.DataFrame, filename: str, county_name: str):
             status_code=400,
             detail=f"Could not extract year from filename: {filename}"
         )
-
-    # Fix anomalies: swap FROM_MEASURE and TO_MEASURE if FROM > TO
-    df['anom'] = df['FROM_MEASURE'] > df['TO_MEASURE']
-    anomaly_index = df[df['anom']].index
-    if not anomaly_index.empty:
-        cols_to_fix = ['FROM_MEASURE', 'TO_MEASURE', 'BEGIN_GLAT', 'BEGIN_GLON', 'END_GLAT', 'END_GLON']
-        cols_source = ['TO_MEASURE', 'FROM_MEASURE', 'END_GLAT', 'END_GLON', 'BEGIN_GLAT', 'BEGIN_GLON']
-        df.loc[anomaly_index, cols_to_fix] = df.loc[anomaly_index, cols_source].values
-        logger.info(f"Fixed {len(anomaly_index)} anomalous rows (FROM_MEASURE > TO_MEASURE)")
-    df = df.drop(columns=['anom'])
 
     # Validate required columns
     required_columns = [
@@ -95,6 +85,16 @@ def _process_dataframe_to_bq(df: pd.DataFrame, filename: str, county_name: str):
     # Clean and cast all columns properly
     df = clean_and_cast_columns(df, filename)
 
+    # Fix anomalies: swap FROM_MEASURE and TO_MEASURE if FROM > TO
+    df['anom'] = df['FROM_MEASURE'] > df['TO_MEASURE']
+    anomaly_index = df[df['anom']].index
+    if not anomaly_index.empty:
+        cols_to_fix = ['FROM_MEASURE', 'TO_MEASURE', 'BEGIN_GLAT', 'BEGIN_GLON', 'END_GLAT', 'END_GLON']
+        cols_source = ['TO_MEASURE', 'FROM_MEASURE', 'END_GLAT', 'END_GLON', 'BEGIN_GLAT', 'BEGIN_GLON']
+        df.loc[anomaly_index, cols_to_fix] = df.loc[anomaly_index, cols_source].values
+        logger.info(f"Fixed {len(anomaly_index)} anomalous rows (FROM_MEASURE > TO_MEASURE)")
+    df = df.drop(columns=['anom'])
+
     # Fill NULL IRI values from LIRI/RIRI where available
     if "LIRI" in df.columns and "RIRI" in df.columns:
         iri_null = df["IRI"].isna()
@@ -110,14 +110,18 @@ def _process_dataframe_to_bq(df: pd.DataFrame, filename: str, county_name: str):
     destination_table = f"{county_dataset}.{table_name}"
     logger.info(f"Uploading {len(df)} rows to {destination_table}")
 
-    pandas_gbq.to_gbq(
-        df,
-        destination_table=destination_table,
-        project_id=PROJECT_ID,
-        credentials=get_credentials(),
-        if_exists='replace',  # WRITE_TRUNCATE
-        progress_bar=False
-    )
+    if postgres.DATABASE_URL:
+        postgres.load_distress(df, county_dataset, table_name)
+    else:
+        ensure_dataset_exists(county_dataset)
+        pandas_gbq.to_gbq(
+            df,
+            destination_table=destination_table,
+            project_id=PROJECT_ID,
+            credentials=get_credentials(),
+            if_exists='replace',  # WRITE_TRUNCATE
+            progress_bar=False
+        )
 
     logger.info(f"Uploaded {filename} to {county_dataset}.{table_name} with {len(df)} rows")
     return {
@@ -137,6 +141,8 @@ def create_upload_url(county_name: str = None, filename: str = None):
 
     Returns the signed URL plus the blob path to hand back to /ingest.
     """
+    if postgres.DATABASE_URL:
+        raise HTTPException(status_code=404, detail="Cloud Storage uploads are disabled")
     if not county_name:
         raise HTTPException(status_code=400, detail="County name is required")
     if not filename:
@@ -173,6 +179,8 @@ def ingest_from_gcs(county_name: str = None, blob_path: str = None, filename: st
     Downloads the object server-side (no request-size limit between Cloud Run
     and GCS), then runs the same cleaning + BigQuery load as /upload.
     """
+    if postgres.DATABASE_URL:
+        raise HTTPException(status_code=404, detail="Cloud Storage uploads are disabled")
     if not county_name:
         raise HTTPException(status_code=400, detail="County name is required")
     if not blob_path:
@@ -203,7 +211,7 @@ def ingest_from_gcs(county_name: str = None, blob_path: str = None, filename: st
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read file {filename}: {str(e)}")
 
-    result = _process_dataframe_to_bq(df, filename, county_name)
+    result = _process_dataframe(df, filename, county_name)
 
     # Best-effort cleanup of the staged upload
     try:
@@ -221,10 +229,10 @@ def ingest_from_gcs(county_name: str = None, blob_path: str = None, filename: st
 
 
 @router.post("/upload")
-async def upload_files(files: List[UploadFile] = File(...), county_name: str = None):
+def upload_files(files: List[UploadFile] = File(...), county_name: str = None):
     """
-    Upload Excel/CSV distress files via multipart (legacy path, <32MB per file).
-    For larger files the frontend uses /upload-url + /ingest instead.
+    Upload Excel/CSV distress files via multipart.
+    The hosted frontend uses /upload-url + /ingest to bypass Cloud Run request limits.
 
     Args:
         files: Excel/CSV files to upload
@@ -238,7 +246,7 @@ async def upload_files(files: List[UploadFile] = File(...), county_name: str = N
         uploaded_tables = []
 
         for file in files:
-            contents = await file.read()
+            contents = file.file.read()
             logger.info(f"Read {len(contents)} bytes from {file.filename}")
             try:
                 df = _read_dataframe(contents, file.filename)
@@ -250,7 +258,7 @@ async def upload_files(files: List[UploadFile] = File(...), county_name: str = N
                     detail=f"Could not read file {file.filename}: {str(e1)}"
                 )
 
-            result = _process_dataframe_to_bq(df, file.filename, county_name)
+            result = _process_dataframe(df, file.filename, county_name)
             uploaded_tables.append(result)
 
         return {

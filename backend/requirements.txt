@@ -9,6 +9,7 @@ google-auth==2.25.2
 db-dtypes==1.2.0
 python-dotenv==1.0.0
 pandas-gbq==0.20.0
+psycopg[binary]==3.2.13
 
 # Testing
 pytest==8.0.0

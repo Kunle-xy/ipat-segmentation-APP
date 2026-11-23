@@ -59,9 +59,6 @@ setup:
 	else \
 		echo "$(YELLOW).env already exists$(NC)"; \
 	fi
-	@if [ ! -f backend/gcp-service-account.json ]; then \
-		echo "$(YELLOW)⚠ Don't forget to add backend/gcp-service-account.json$(NC)"; \
-	fi
 
 ## dev: Start services in development mode
 dev: setup

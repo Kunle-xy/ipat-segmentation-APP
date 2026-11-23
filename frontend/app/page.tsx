@@ -84,6 +84,31 @@ const MapView = dynamic(() => import('@/components/MapView'), {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8010'
 
+async function uploadDistressFile(file: File, county: string) {
+  if (process.env.NEXT_PUBLIC_UPLOAD_MODE === 'direct') {
+    const form = new FormData()
+    form.append('files', file)
+    return axios.post(`${API_URL}/upload`, form, { params: { county_name: county } })
+  }
+
+  // 1. Get a signed URL to upload the file straight to Cloud Storage.
+  //    This bypasses Cloud Run's 32MB request-body limit.
+  const urlResp = await axios.post(`${API_URL}/upload-url`, null, {
+    params: { county_name: county, filename: file.name }
+  })
+  const { upload_url, blob_path } = urlResp.data
+
+  // 2. PUT the file directly to GCS (no size limit on this request).
+  await axios.put(upload_url, file, {
+    headers: { 'Content-Type': file.type || 'application/octet-stream' }
+  })
+
+  // 3. Tell the backend to ingest the staged file into BigQuery.
+  return axios.post(`${API_URL}/ingest`, null, {
+    params: { county_name: county, blob_path, filename: file.name }
+  })
+}
+
 interface UploadedFile {
   filename: string
   status: 'pending' | 'uploading' | 'success' | 'error'
@@ -265,22 +290,7 @@ export default function Home() {
       try {
         const county = countyName.trim().toLowerCase()
 
-        // 1. Get a signed URL to upload the file straight to Cloud Storage.
-        //    This bypasses Cloud Run's 32MB request-body limit.
-        const urlResp = await axios.post(`${API_URL}/upload-url`, null, {
-          params: { county_name: county, filename: file.name }
-        })
-        const { upload_url, blob_path } = urlResp.data
-
-        // 2. PUT the file directly to GCS (no size limit on this request).
-        await axios.put(upload_url, file, {
-          headers: { 'Content-Type': file.type || 'application/octet-stream' }
-        })
-
-        // 3. Tell the backend to ingest the staged file into BigQuery.
-        const response = await axios.post(`${API_URL}/ingest`, null, {
-          params: { county_name: county, blob_path, filename: file.name }
-        })
+        const response = await uploadDistressFile(file, county)
 
         setUploadedFiles(prev =>
           prev.map(f =>

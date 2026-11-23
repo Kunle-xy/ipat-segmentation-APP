@@ -55,7 +55,7 @@ check_prerequisites() {
 
     # Check if Docker daemon is running
     if ! docker info &> /dev/null; then
-        print_error "Docker daemon is not running. Please start Docker."
+        print_error "Cannot connect to the Docker daemon. Check daemon status and access to the Docker socket."
         exit 1
     fi
     print_success "Docker daemon is running"
@@ -65,18 +65,19 @@ check_prerequisites() {
 setup_environment() {
     print_header "Setting Up Environment"
 
+    local mode=${1:-development}
+
     # Check if .env exists
     if [ ! -f .env ]; then
         print_info "Creating .env file from .env.example..."
         cp .env.example .env
-        print_warning ".env file created. Please update it with your actual values!"
-        print_info "Required changes:"
-        echo "  1. Set GCP_PROJECT_ID to your Google Cloud project ID"
-        echo "  2. Place your GCP service account JSON in backend/gcp-service-account.json"
-        echo ""
-        read -p "Press Enter after updating .env and adding credentials..."
+        print_info ".env created from .env.example"
     else
         print_success ".env file exists"
+    fi
+
+    if [ "$mode" != production ]; then
+        return
     fi
 
     # Check if GCP credentials exist
@@ -85,7 +86,7 @@ setup_environment() {
         print_info "Please place your service account JSON file at:"
         echo "  backend/gcp-service-account.json"
         echo ""
-        read -p "Press Enter after adding credentials..."
+        return 1
     else
         print_success "GCP credentials found"
     fi
@@ -167,7 +168,9 @@ show_menu() {
 
 # Main script
 main() {
-    clear
+    if [ -t 1 ] && [ -n "${TERM:-}" ]; then
+        clear
+    fi
     print_header "IPAT Application - Docker Setup"
 
     # Check prerequisites
@@ -182,7 +185,7 @@ main() {
                 show_urls
                 ;;
             start-prod)
-                setup_environment
+                setup_environment production
                 start_services production
                 show_urls
                 ;;
@@ -219,7 +222,7 @@ main() {
                 show_urls
                 ;;
             2)
-                setup_environment
+                setup_environment production
                 start_services production
                 show_urls
                 ;;
